@@ -28,7 +28,7 @@ class Config:
         self.DATA_FETCH_DELAY = 5
         self.MAX_WORKERS = 15
         self.CODE_ALIASES = {'代码': '股票代码', '证券代码': '股票代码', '股票代码': '股票代码'}
-        # 【此处已修改】扩展 NAME_ALIASES，增加 '简' 和 '证券名称'，确保捕获股票简称
+        # 别名已包含所有常见名称
         self.NAME_ALIASES = {'名称': '股票简称', '股票名称': '股票简称', '股票简称': '股票简称', '简称': '股票简称', '简': '股票简称', '证券名称': '股票简称'} 
         self.PRICE_ALIASES = {'最新价': '最新价', '现价': '最新价', '当前价格': '最新价'}
 
@@ -125,7 +125,7 @@ class StockAnalyzer:
         return cleaned_df
 
     def _clean_and_standardize(self, df: pd.DataFrame, df_name: str) -> pd.DataFrame:
-        """【已优化】通用数据清洗和列名标准化，增强名称捕获。"""
+        """通用数据清洗和列名标准化。"""
         if df.empty: return df
 
         # 1. 标准化列名：使用 Config 中的别名映射
@@ -145,8 +145,7 @@ class StockAnalyzer:
         df.drop_duplicates(subset=['股票代码'], inplace=True)
         df['股票代码'] = df['股票代码'].astype(str).str.zfill(6)
 
-        # 3. 过滤ST股 (需要 '股票简称' 列)
-        # 移除了冗余的 '名称' 检查代码，现在完全依赖 Config 中的 NAME_ALIASES
+        # 3. 过滤ST股 (依赖 '股票简称' 列)
         if '股票简称' not in df.columns:
             # 如果没有简称，就无法过滤 ST 股，但仍返回清洗过代码格式的 DF
             cleaned_df = df.copy()
@@ -718,8 +717,18 @@ class StockAnalyzer:
                     pass
         print("旧的临时数据文件清理完成。")
 
+        # --- 【已修改】强制清除实时行情缓存，确保股票简称的修复生效 ---
+        spot_cache_path = self._get_file_path("A股实时行情", cleaned=True)
+        if os.path.exists(spot_cache_path):
+            try:
+                os.remove(spot_cache_path)
+                print(f"[FIX] 强制清除了【A股实时行情】缓存: {os.path.basename(spot_cache_path)}，下次运行时将重新获取数据。")
+            except Exception as e:
+                print(f"[WARN] 无法清除实时行情缓存: {e}")
+        # -----------------------------------------------------
+
         try:
-            # 1. 获取所有原始数据 (已集成缓存和清洗)
+            # 1. 获取所有原始数据 (将强制重新获取 A股实时行情)
             raw_data = self._get_all_raw_data()
 
             # 预处理主力研报数据
