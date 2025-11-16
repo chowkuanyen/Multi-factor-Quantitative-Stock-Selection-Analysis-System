@@ -737,3 +737,9 @@ class StockAnalyzer:
         finally:
             end_time = time.time()
             print(f"\n>>> 流程结束。总耗时: {timedelta(seconds=end_time - self.start_time)}")
+
+
+if __name__ == "__main__":
+    # 这是程序的入口点，确保在文件作为脚本运行时，StockAnalyzer被创建并执行
+    analyzer = StockAnalyzer()
+    analyzer.run()
