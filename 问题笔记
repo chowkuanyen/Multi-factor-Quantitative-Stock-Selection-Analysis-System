@@ -246,7 +246,9 @@ class StockAnalyzer:
         return pd.DataFrame()
 
     def _fetch_hist_data_parallel(self, codes: List[str], days: int) -> pd.DataFrame:
-        """并行获取指定股票的历史数据。"""
+        """
+        并行获取指定股票的历史数据，并强制将 OHLCV 列名统一为英文小写。
+        """
         print(f"\n正在为 {len(codes)} 只股票下载 {days} 天的历史数据...")
 
         end_date = datetime.now()
@@ -260,18 +262,17 @@ class StockAnalyzer:
         cached_df = self._load_data_from_cache(file_path)
         
         if not cached_df.empty:
-            # FIX 1: 如果缓存中是 'date' 字段，则重命名为 '日期'，以兼容 AKShare 的输出
+            # FIX: 历史数据无论来自哪里，都使用标准英文列名
+            # 确保 'date' 字段存在且格式正确
             if 'date' in cached_df.columns:
-                cached_df.rename(columns={'date': '日期'}, inplace=True)
-            # FIX 2: 如果缓存中是 'close' 字段，则重命名为 '收盘'
-            if 'close' in cached_df.columns:
-                cached_df.rename(columns={'close': '收盘'}, inplace=True)
+                 cached_df['date'] = pd.to_datetime(cached_df['date']).dt.strftime('%Y-%m-%d')
             
-            # 确保 '日期' 字段存在且格式正确
-            if '日期' in cached_df.columns:
-                 cached_df['日期'] = pd.to_datetime(cached_df['日期']).dt.strftime('%Y-%m-%d')
-            
-            return cached_df
+            # 确保关键英文列存在
+            if 'close' in cached_df.columns and 'open' in cached_df.columns:
+                 return cached_df
+            else:
+                 print("[WARN] 历史数据缓存文件缺少关键英文列，将重新获取。")
+
 
         all_data = []
         future_to_code = {}
@@ -291,17 +292,26 @@ class StockAnalyzer:
                 try:
                     hist_df = future.result()
                     if hist_df is not None and not hist_df.empty:
-                        # 再次检查 'date' 字段，以防 akshare 接口未来变化
-                        if 'date' in hist_df.columns:
-                            hist_df.rename(columns={'date': '日期'}, inplace=True)
-                        # NEW FIX: 检查 'close' 字段，以防 akshare 接口未来变化
-                        if 'close' in hist_df.columns:
-                            hist_df.rename(columns={'close': '收盘'}, inplace=True)
-                            
+                        
+                        # **核心修复点：强制统一列名为英文小写**
+                        hist_df.rename(columns={
+                            'date': 'date', '日期': 'date', 
+                            'open': 'open', '开盘': 'open',
+                            'close': 'close', '收盘': 'close',
+                            'high': 'high', '最高': 'high',
+                            'low': 'low', '最低': 'low',
+                            'volume': 'volume', '成交量': 'volume', 'amount': 'volume', # 假设 amount 是成交量
+                        }, inplace=True, errors='ignore')
+
                         hist_df['股票代码'] = code
                         # 确保日期是字符串格式
-                        if '日期' in hist_df.columns:
-                            hist_df['日期'] = pd.to_datetime(hist_df['日期']).dt.strftime('%Y-%m-%d')
+                        if 'date' in hist_df.columns:
+                            hist_df['date'] = pd.to_datetime(hist_df['date']).dt.strftime('%Y-%m-%d')
+                            
+                        # 只保留需要的列
+                        cols_to_keep = ['date', 'open', 'close', 'high', 'low', 'volume', '股票代码']
+                        hist_df = hist_df[[col for col in cols_to_keep if col in hist_df.columns]]
+                        
                         all_data.append(hist_df)
                 except Exception as e:
                     # print(f"[ERROR] 错误：获取 {code} 的历史数据时出错: {e}")
@@ -325,44 +335,33 @@ class StockAnalyzer:
             print("[WARN] 历史数据为空，跳过技术分析。")
             return {key: pd.DataFrame() for key in ta_signals.keys()}
 
-        # 确保数据是连续的且已排序
-        hist_df_all.sort_values(['股票代码', '日期'], inplace=True)
-
-        # 定义中文列名到英文列名的映射，以兼容 pandas_ta
-        col_map = {
-            '收盘': 'close',
-            '开盘': 'open',
-            '最高': 'high',
-            '最低': 'low',
-            '成交量': 'volume' # 成交量可能不需要，但为了兼容性先加上
-        }
+        # 确保数据是连续的且已排序 (使用标准化的 'date' 列)
+        hist_df_all.sort_values(['股票代码', 'date'], inplace=True)
 
         for code in all_codes:
+            # df 现在应该已经包含了 'open', 'close', 'high', 'low' 等标准列名
             df = hist_df_all[hist_df_all['股票代码'] == code].copy()
 
             if df.empty or len(df) < 30: # 至少需要30条数据用于BOLL和KDJ
                 continue
 
-            # 确保所需列是数字类型
-            for col in ['收盘', '开盘', '最高', '最低']:
+            # 确保所需列是数字类型 (使用英文列名)
+            for col in ['close', 'open', 'high', 'low']: 
                 if col in df.columns:
                     df[col] = pd.to_numeric(df[col], errors='coerce')
             
-            df.dropna(subset=['收盘'], inplace=True)
+            df.dropna(subset=['close'], inplace=True)
             if df.empty: continue
             
-            # **【核心修复】临时重命名列以兼容 pandas_ta**
-            df.rename(columns={cn: en for cn, en in col_map.items() if cn in df.columns}, inplace=True)
-            
-            # 确保重命名后的关键列存在
+            # 确保关键列存在 (现在只检查英文小写)
             if 'close' not in df.columns or 'open' not in df.columns or 'high' not in df.columns or 'low' not in df.columns:
                 print(f"[ERROR] 股票 {code}: 历史数据中缺少必要的 OHLC 列，跳过 TA 计算。")
                 continue
 
-
             try:
                 # 1. MACD (金叉)
-                df.ta.macd(append=True, fast=12, slow=26, signal=9, close='close') # 明确指定 close 列
+                # 由于列名已标准化，MACD可以直接计算
+                df.ta.macd(append=True, fast=12, slow=26, signal=9, close='close') 
                 macd_cols = [col for col in df.columns if col.startswith('MACD_') or col.startswith('MACDH_') or col.startswith('MACDS_')]
                 if len(macd_cols) >= 3:
                     # 获取 MACDH (柱状线) 的列名，确保它是存在的
