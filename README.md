@@ -25,8 +25,6 @@
 
 本项目依赖 Python 3.6+ 环境。
 
-1. 安装 Python 依赖库
-2. 
 您需要安装以下库：akshare, pandas, numpy, xlsxwriter, 和 pandas-ta。
 
 pip install akshare pandas numpy openpyxl xlsxwriter pandas-ta
