@@ -1,1 +1,29 @@
-https://hybrid.gelonghui.com/stock-check/sz002049
+# C. 资金流向-5day
+        # ... 合并逻辑 ...
+        final_df = pd.merge(final_df, merge_df, on='股票简称', how='left')
+
+        # 确保列名为 '资金流入净额' 且为数值类型
+        final_df['5日资金流入'] = final_df['资金流入净额']
+        # **修复 1：立即删除临时列**
+        final_df.drop(columns=['资金流入净额'], errors='ignore', inplace=True) 
+        # 现在，'资金流入净额' 已经不存在了，下一次合并会添加新的 '资金流入净额'
+
+        # C. 资金流向-10day
+
+        # ... 数据源检查 ...
+
+        # 检查数据源是否为空且包含必要的列
+        if not fund_flow_df_10.empty and '股票简称' in fund_flow_df_10.columns and '资金流入净额' in fund_flow_df_10.columns:
+            # 1. 提取股票代码和资金流入净额
+            merge_df_10 = fund_flow_df_10[['股票简称', '资金流入净额']].drop_duplicates(subset=['股票简称'])
+
+            # 2. 合并到 final_df
+            final_df = pd.merge(final_df, merge_df_10, on='股票简称', how='left')
+
+            # 确保列名为 '资金流入净额' 且为数值类型
+            final_df['10日资金流入'] = final_df['资金流入净额']
+            # **修复 2：立即删除临时列**
+            final_df.drop(columns=['资金流入净额'], errors='ignore', inplace=True) 
+        else:
+            # 如果数据源缺失，则创建空列并填充 0.0
+            final_df['10日资金流入'] = ''
