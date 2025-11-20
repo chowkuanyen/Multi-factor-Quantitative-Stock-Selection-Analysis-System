@@ -25,7 +25,7 @@ class Config:
         self.SAVE_DIRECTORY = os.path.join(self.HOME_DIRECTORY, 'Downloads', 'CoreNews_Reports')
         self.TEMP_DATA_DIRECTORY = os.path.join(self.SAVE_DIRECTORY, 'ShareData')
         self.DATA_FETCH_RETRIES = 3
-        self.DATA_FETCH_DELAY = 5 #
+        self.DATA_FETCH_DELAY = 5  #
         self.MAX_WORKERS = 15
         self.CODE_ALIASES = {'代码': '股票代码', '证券代码': '股票代码', '股票代码': '股票代码'}
         # 别名已包含所有常见名称
@@ -310,7 +310,7 @@ class StockAnalyzer:
                     symbol=format_stock_code(code),
                     start_date=start_date_str,
                     end_date=end_date_str,
-                    adjust="hfq" # 前复权
+                    adjust="hfq"  # 前复权
                 )
                 future_to_code[future] = code
 
@@ -391,7 +391,7 @@ class StockAnalyzer:
 
             # 4. 判断 MACD 金叉信号 (DIF 上穿 DEA) 和零轴位置
             cross_col = f'MACD_{name}_CROSS'
-            signal_col = f'MACD_{name}_SIGNAL_DETAIL' # <== 新增的列
+            signal_col = f'MACD_{name}_SIGNAL_DETAIL'  # <== 新增的列
 
             # 判定金叉的布尔序列
             is_cross = (df[dif_col] > df[dea_col]) & \
@@ -407,7 +407,7 @@ class StockAnalyzer:
                     # 零轴下金叉条件: 金叉发生，且 DIF 或 DEA 小于等于 0
                     '零轴下金叉'
                 ),
-                '' # 非金叉，返回空字符串
+                ''  # 非金叉，返回空字符串
             )
 
             # 保持原有的 CROSS 标志位 (非必须，但保持兼容)
@@ -426,28 +426,28 @@ class StockAnalyzer:
         """根据CCI值，将其分类为专业的市场状态术语。"""
         if pd.isna(cci_value):
             return 'N/A'
-            
+
         # 1. 极度超买区 (Ultra-Overbought)
         if cci_value > 200:
             return f'极度超买 ({cci_value:.2f})'
-        
+
         # 2. 强势超买区 (Strong Overbought)
         elif cci_value >= 100:
             return f'强势超买 ({cci_value:.2f})'
-        
+
         # 3. 常态波动/整理区 (Normal Fluctuation/Consolidation)
         elif cci_value > -100:
             # 在报告中我们只关注超买/超卖，常态波动直接返回空字符串
             return ''
-            
+
         # 4. 弱势超卖区 (Weak Oversold)
         elif cci_value >= -200:
             return f'弱势超卖 ({cci_value:.2f})'
-            
+
         # 5. 极度超卖区 (Ultra-Oversold)
-        else: # cci_value < -200
+        else:  # cci_value < -200
             return f'极度超卖 ({cci_value:.2f})'
-            
+
     # ==========================================================================
 
     def _save_ta_signals_to_txt(self, ta_signals: Dict[str, pd.DataFrame]):
@@ -555,11 +555,11 @@ class StockAnalyzer:
                 cci_cols = [col for col in df.columns if col.startswith('CCI_')]
                 if cci_cols:
                     cci_col = cci_cols[0]
-                    
+
                     # **核心改进点：使用专业分类函数**
                     current_cci = df[cci_col].iloc[-1]
                     cci_signal = self._classify_cci_level(current_cci)
-                    
+
                     # 只有当CCI状态是超买或超卖时才记录，跳过常态波动/整理
                     if cci_signal:
                         ta_signals['CCI'].append(
@@ -914,7 +914,7 @@ class StockAnalyzer:
                     row['CCI_Signal'] != '' or
                     row['RSI_Signal'] != '' or
                     row['BOLL_Signal'] != ''
-                  )
+                    )
 
         final_df = final_df[final_df.apply(has_any_signal, axis=1)].copy()
 
@@ -1112,7 +1112,7 @@ class StockAnalyzer:
                 'MACD_12269金叉': ta_signals.get('MACD_12269', pd.DataFrame()),  # 增加标准周期表格
                 'MACD_6135金叉': ta_signals.get('MACD_6135', pd.DataFrame()),  # 增加加速周期表格
                 'KDJ超卖金叉': ta_signals.get('KDJ', pd.DataFrame()),
-                'CCI专业状态': ta_signals.get('CCI', pd.DataFrame()), # **改进点：使用专业状态**
+                'CCI专业状态': ta_signals.get('CCI', pd.DataFrame()),  # **改进点：使用专业状态**
                 'RSI超卖': ta_signals.get('RSI', pd.DataFrame()),
                 'BOLL低波': ta_signals.get('BOLL', pd.DataFrame()),
                 '前十板块成分股': raw_data['top_industry_cons_df'],
