@@ -95,8 +95,15 @@ class StockAnalyzer:
         # 1. 尝试从【清洗后的缓存】加载数据
         cleaned_file_path = self._get_file_path(file_base_name, cleaned=True)
         cached_df = self._load_data_from_cache(cleaned_file_path)
+
         if not cached_df.empty:
-            return cached_df
+            # === 修复：新增检查：如果关键的 '股票代码' 丢失，则废弃缓存，强制重新获取 ===
+            if '股票代码' not in cached_df.columns:
+                print(f"[WARN] 缓存 {os.path.basename(cleaned_file_path)} 缺少关键列 '股票代码'，将强制重新获取。")
+                cached_df = pd.DataFrame()
+            else:
+                return cached_df
+            # === 修复结束 ===
 
         # 2. 如果清洗后的缓存不存在，则尝试从原始获取
         df = pd.DataFrame()
@@ -137,6 +144,8 @@ class StockAnalyzer:
             if old in df.columns: df.rename(columns={old: new}, inplace=True)
 
         if '股票代码' not in df.columns:
+            # 资金流向数据通常有 '代码'，如果映射后仍没有，可能是数据源问题
+            print(f"[WARN] {df_name} 数据标准化后仍缺少 '股票代码' 列，无法进行后续合并。")
             return pd.DataFrame()
 
         # 2. 清洗数据
@@ -168,7 +177,7 @@ class StockAnalyzer:
             'spot_data_all': self._safe_ak_fetch(ak.stock_zh_a_spot, "A股实时行情"),
             'main_report_raw': self._safe_ak_fetch(ak.stock_profit_forecast_em, "主力研报盈利预测"),
             'financial_abstract_raw': self._safe_ak_fetch(ak.stock_financial_abstract, "财务摘要数据"),
-            # ak.stock_fund_flow_individual 返回的数据包含 '股票代码' 和 '资金流入净额'
+            # ak.stock_fund_flow_individual 返回的数据包含 '代码' 和 '主力净流入-净额'
             'market_fund_flow_raw': self._safe_ak_fetch(ak.stock_fund_flow_individual, "5日市场资金流向",
                                                         symbol="5日排行"),
             'market_fund_flow_raw_10': self._safe_ak_fetch(ak.stock_fund_flow_individual, "10日市场资金流向",
@@ -217,8 +226,13 @@ class StockAnalyzer:
         cache_name = "TopIndustryConstituents_经清洗"
         cleaned_file_path = self._get_file_path(cache_name, cleaned=True)
         cached_df = self._load_data_from_cache(cleaned_file_path)
+        
         if not cached_df.empty:
-            return cached_df
+            if '股票代码' not in cached_df.columns:
+                print(f"[WARN] 缓存 {os.path.basename(cleaned_file_path)} 缺少关键列 '股票代码'，将强制重新获取。")
+                cached_df = pd.DataFrame()
+            else:
+                return cached_df
 
         top_industries = industry_board_df.sort_values(by='涨跌幅', ascending=False).head(10)
         all_constituents = []
@@ -328,11 +342,12 @@ class StockAnalyzer:
         cached_df = self._load_data_from_cache(file_path)
 
         if not cached_df.empty:
-            if 'date' in cached_df.columns and 'close' in cached_df.columns:
+            if 'date' in cached_df.columns and 'close' in cached_df.columns and '股票代码' in cached_df.columns:
                 cached_df['date'] = pd.to_datetime(cached_df['date']).dt.strftime('%Y-%m-%d')
                 return cached_df
             else:
-                print("[WARN] 历史数据缓存文件缺少关键英文列，将重新获取。")
+                print("[WARN] 历史数据缓存文件缺少关键列（日期/收盘价/股票代码），将重新获取。")
+                cached_df = pd.DataFrame()
 
         max_workers = self.config.MAX_WORKERS
         total_codes = len(codes)
@@ -592,12 +607,9 @@ class StockAnalyzer:
         filtered_df.rename(columns={'最新价': '当前价格'}, inplace=True)
         return filtered_df.fillna('N/A')
 
-    # <--- 修复后的 _consolidate_data 方法：将资金流向合并键改为 '股票代码' --->
     def _consolidate_data(self, processed_data: Dict[str, pd.DataFrame]) -> pd.DataFrame:
         """
         合并所有数据源和信号，生成最终汇总报告。
-        **核心修复：将 5日/10日/20日资金流入的合并键从 '股票简称' 改为 '股票代码'。**
-        **优化：确保 '最新价' 在填充 'N/A' 前已转换为数值类型。**
         """
         print("\n>>> 正在汇总所有数据和信号 (技术指标作为独立列)...")
 
@@ -606,7 +618,7 @@ class StockAnalyzer:
         data_sources = [
             processed_data.get('processed_main_report'),
             processed_data.get('processed_xstp_df'),
-            # 资金流向DF现在将使用 '股票代码' 合并
+            # 资金流向DF现在都应包含 '股票代码'
             processed_data.get('market_fund_flow_raw'),
             processed_data.get('market_fund_flow_raw_10'),
             processed_data.get('market_fund_flow_raw_20'),
@@ -656,7 +668,7 @@ class StockAnalyzer:
         # 2b. 合并最新价格
         price_source = spot_df[['股票代码', '最新价']].drop_duplicates(subset=['股票代码'])
 
-        # FIX: 确保 '最新价' 能够稳定合并
+        # 确保 '最新价' 能够稳定合并
         final_df = pd.merge(final_df, price_source, on='股票代码', how='left')
         
         final_df['股票简称'] = final_df['股票简称'].fillna('N/A')
@@ -681,31 +693,28 @@ class StockAnalyzer:
         else:
             final_df['完全多头排列'] = final_df['完全多头排列'].fillna('否')
 
-        # C. 资金流向-5d, 10d, 20d (核心修复部分)
+        # C. 资金流向-5d, 10d, 20d (确保使用 '股票代码' 合并)
         
         # 5日资金流向
         fund_flow_df_5 = processed_data.get('market_fund_flow_raw', pd.DataFrame())
-        # FIX: 确保使用 '股票代码' 合并
-        if not fund_flow_df_5.empty and '股票代码' in fund_flow_df_5.columns and '资金流入净额' in fund_flow_df_5.columns:
-            merge_df_5 = fund_flow_df_5[['股票代码', '资金流入净额']].rename(columns={'资金流入净额': '5日资金流入'}).drop_duplicates(subset=['股票代码'])
+        if not fund_flow_df_5.empty and '股票代码' in fund_flow_df_5.columns and '主力净流入-净额' in fund_flow_df_5.columns:
+            merge_df_5 = fund_flow_df_5[['股票代码', '主力净流入-净额']].rename(columns={'主力净流入-净额': '5日资金流入'}).drop_duplicates(subset=['股票代码'])
             final_df = pd.merge(final_df, merge_df_5, on='股票代码', how='left')
         else:
             final_df['5日资金流入'] = 'N/A'
 
         # 10日资金流向
         fund_flow_df_10 = processed_data.get('market_fund_flow_raw_10', pd.DataFrame())
-        # FIX: 确保使用 '股票代码' 合并
-        if not fund_flow_df_10.empty and '股票代码' in fund_flow_df_10.columns and '资金流入净额' in fund_flow_df_10.columns:
-            merge_df_10 = fund_flow_df_10[['股票代码', '资金流入净额']].rename(columns={'资金流入净额': '10日资金流入'}).drop_duplicates(subset=['股票代码'])
+        if not fund_flow_df_10.empty and '股票代码' in fund_flow_df_10.columns and '主力净流入-净额' in fund_flow_df_10.columns:
+            merge_df_10 = fund_flow_df_10[['股票代码', '主力净流入-净额']].rename(columns={'主力净流入-净额': '10日资金流入'}).drop_duplicates(subset=['股票代码'])
             final_df = pd.merge(final_df, merge_df_10, on='股票代码', how='left')
         else:
              final_df['10日资金流入'] = 'N/A'
 
         # 20日资金流向
         fund_flow_df_20 = processed_data.get('market_fund_flow_raw_20', pd.DataFrame())
-        # FIX: 确保使用 '股票代码' 合并
-        if not fund_flow_df_20.empty and '股票代码' in fund_flow_df_20.columns and '资金流入净额' in fund_flow_df_20.columns:
-            merge_df_20 = fund_flow_df_20[['股票代码', '资金流入净额']].rename(columns={'资金流入净额': '20日资金流入'}).drop_duplicates(subset=['股票代码'])
+        if not fund_flow_df_20.empty and '股票代码' in fund_flow_df_20.columns and '主力净流入-净额' in fund_flow_df_20.columns:
+            merge_df_20 = fund_flow_df_20[['股票代码', '主力净流入-净额']].rename(columns={'主力净流入-净额': '20日资金流入'}).drop_duplicates(subset=['股票代码'])
             final_df = pd.merge(final_df, merge_df_20, on='股票代码', how='left')
         else:
             final_df['20日资金流入'] = 'N/A'
@@ -713,9 +722,7 @@ class StockAnalyzer:
         # 统一处理资金流入列的类型
         for col in ['5日资金流入', '10日资金流入', '20日资金流入']:
             if col in final_df.columns:
-                # 再次强调，将数值转换为浮点数，然后将 NaN 填充为 'N/A'
                 final_df[col] = pd.to_numeric(final_df[col], errors='coerce').fillna('N/A')
-            # 确保即使数据源缺失，该列也存在
             elif col not in final_df.columns:
                 final_df[col] = 'N/A'
         
@@ -820,7 +827,6 @@ class StockAnalyzer:
 
 
         return final_df
-    # <--- 修复后的 _consolidate_data 方法结束 --->
 
     def _generate_excel_report(self, sheets_data: Dict[str, pd.DataFrame]):
         """
