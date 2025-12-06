@@ -261,11 +261,6 @@ class StockAnalyzer:
         def calculate_single_macd(df, fast, slow, signal):
             """内部辅助函数：计算并返回带有信号的DataFrame"""
 
-            # 1. 使用 pandas_ta 计算 MACD 相关的列
-            # 默认列名：MACD_12_26_9, MACDh_12_26_9, MACDs_12_26_9
-            # 我们需要 DIF 线，其计算方式为：MACD (DIF) - MACDs (DEA)
-            # 简化计算，直接使用 EMA
-            
             # 使用 EWM 计算 EMA
             ema_fast = close.ewm(span=fast, adjust=False).mean()
             ema_slow = close.ewm(span=slow, adjust=False).mean()
@@ -304,6 +299,22 @@ class StockAnalyzer:
 
         return df
 
+    # --- NEW FUNCTION ---
+    def _extract_current_macd_values(self, df: pd.DataFrame, diff_col: str, prefix: str) -> Dict[str, Any]:
+        """
+        提取当前最新的 MACD (DIF) 值。
+        """
+        value_col = f'{prefix}_DIF'
+        if diff_col in df.columns:
+            current_value = df[diff_col].iloc[-1]
+            # 仅返回最新的非 NaN 值 (如果最后一行是 NaN)
+            if pd.isna(current_value):
+                 current_value = df[diff_col].dropna().iloc[-1] if not df[diff_col].dropna().empty else np.nan
+
+            return {'股票代码': df['股票代码'].iloc[-1], value_col: current_value}
+        return {}
+    # --------------------
+
     def _classify_cci_level(self, cci_value: float) -> str:
         """将 CCI 值分类为专业状态 (此处使用简化逻辑，以专注于核心集成点)"""
         if cci_value > 200:
@@ -311,7 +322,7 @@ class StockAnalyzer:
         elif cci_value > 100:
             return f"超买 ({cci_value:.2f})"
         elif cci_value < -200:
-            return f"极度超卖 ({cci_value:.2f})"
+            return f"极度超卖 ({cci_value:.2f})" 
         elif cci_value < -100:
             return f"超卖 ({cci_value:.2f})"
         return ''
@@ -334,6 +345,16 @@ class StockAnalyzer:
         try:
             # 1. MACD (金叉) - **计算并提取两种周期的信号**
             df = self._custom_macd(df)
+
+            # --- 新增 MACD 当前值提取 ---
+            macd_val_12269 = self._extract_current_macd_values(df, 'MACD_12_26_DIF', 'MACD_12269')
+            if macd_val_12269:
+                 ta_signals['MACD_12269_VAL'].append(macd_val_12269)
+            
+            macd_val_6135 = self._extract_current_macd_values(df, 'MACD_6_13_DIF', 'MACD_6135')
+            if macd_val_6135:
+                 ta_signals['MACD_6135_VAL'].append(macd_val_6135)
+            # ---------------------------
 
             # --- 新增动能状态计算与提取 ---
             # 计算 MACD_12269 动能状态
@@ -370,7 +391,7 @@ class StockAnalyzer:
             # ----------------------------------------------------
 
             # 提取 MACD 12269 信号
-            detail_col_12269 = 'MACD_122699_SIGNAL_DETAIL' # 注意：取决于 _custom_macd 的实际实现
+            detail_col_12269 = 'MACD_122699_SIGNAL_DETAIL'
             if detail_col_12269 in df.columns:
                 signal_detail = df[detail_col_12269].iloc[-1]
                 if signal_detail != '':
@@ -385,8 +406,6 @@ class StockAnalyzer:
 
             # 2. KDJ (超卖金叉) - 使用 pandas_ta
             df.ta.stoch(append=True, k=9, d=3, smooth_k=3)
-            k_col, d_col, j_col = 'STOCHk_9_3_3', 'STOCHd_9_3_3', 'STOCHj_9_3_3'
-            
             # (KDJ 信号提取逻辑省略，假设原代码已实现)
             # ...
 
@@ -430,8 +449,10 @@ class StockAnalyzer:
             'CCI': [],
             'RSI': [],
             'BOLL': [],
-            'MACD_12269_DYN': [], # <-- NEW
-            'MACD_6135_DYN': [], # <-- NEW
+            'MACD_12269_DYN': [], # MACD 动能状态
+            'MACD_6135_DYN': [], # MACD 动能状态
+            'MACD_12269_VAL': [], # <-- NEW: MACD 当前 DIF 值
+            'MACD_6135_VAL': [], # <-- NEW: MACD 当前 DIF 值
         }
 
         future_to_code = {
@@ -458,7 +479,7 @@ class StockAnalyzer:
         return processed_ta_dfs
     
     # ==========================================================================
-    # [修改] _consolidate_data: 确保 MACD 动能状态列被合并
+    # [修改] _consolidate_data: 确保 MACD 动能状态和当前值列被合并
     # ==========================================================================
     def _consolidate_data(self, processed_data: Dict[str, pd.DataFrame]) -> pd.DataFrame:
         """合并所有数据源和信号，生成最终汇总报告。"""
@@ -475,9 +496,11 @@ class StockAnalyzer:
             processed_data.get('ljqs_raw'),
             processed_data.get('cxfl_raw'),
             processed_data.get('MACD_12269', pd.DataFrame()),
-            processed_data.get('MACD_12269_DYN', pd.DataFrame()), # <-- NEW
+            processed_data.get('MACD_12269_DYN', pd.DataFrame()),
+            processed_data.get('MACD_12269_VAL', pd.DataFrame()), # <-- NEW
             processed_data.get('MACD_6135', pd.DataFrame()),
-            processed_data.get('MACD_6135_DYN', pd.DataFrame()), # <-- NEW
+            processed_data.get('MACD_6135_DYN', pd.DataFrame()),
+            processed_data.get('MACD_6135_VAL', pd.DataFrame()), # <-- NEW
             processed_data.get('KDJ', pd.DataFrame()),
             processed_data.get('CCI', pd.DataFrame()),
             processed_data.get('RSI', pd.DataFrame()),
@@ -499,28 +522,40 @@ class StockAnalyzer:
         # 3. 合并所有技术指标信号
         ta_dfs_to_merge = []
 
-        # 1. MACD 12269
+        # MACD 12269 信号
         macd_12269_df = processed_data.get('MACD_12269', pd.DataFrame())
         if not macd_12269_df.empty:
             ta_dfs_to_merge.append(macd_12269_df[['股票代码', 'MACD_12269_Signal']].rename(
                 columns={'MACD_12269_Signal': 'MACD_12269'}))
 
-        # **NEW** MACD 12269 动能状态
+        # MACD 12269 动能状态
         macd_12269_dyn_df = processed_data.get('MACD_12269_DYN', pd.DataFrame())
         if not macd_12269_dyn_df.empty:
             ta_dfs_to_merge.append(macd_12269_dyn_df[['股票代码', 'MACD_12269_DYN', 'MACD_12269_SLOPE']])
 
+        # **NEW** MACD 12269 当前值
+        macd_12269_val_df = processed_data.get('MACD_12269_VAL', pd.DataFrame())
+        if not macd_12269_val_df.empty:
+            # 列名已是 MACD_12269_DIF
+            ta_dfs_to_merge.append(macd_12269_val_df[['股票代码', 'MACD_12269_DIF']])
 
-        # 2. MACD 6135
+
+        # MACD 6135 信号
         macd_6135_df = processed_data.get('MACD_6135', pd.DataFrame())
         if not macd_6135_df.empty:
             ta_dfs_to_merge.append(macd_6135_df[['股票代码', 'MACD_6135_Signal']].rename(
                 columns={'MACD_6135_Signal': 'MACD_6135'}))
 
-        # **NEW** MACD 6135 动能状态
+        # MACD 6135 动能状态
         macd_6135_dyn_df = processed_data.get('MACD_6135_DYN', pd.DataFrame())
         if not macd_6135_dyn_df.empty:
             ta_dfs_to_merge.append(macd_6135_dyn_df[['股票代码', 'MACD_6135_DYN', 'MACD_6135_SLOPE']])
+            
+        # **NEW** MACD 6135 当前值
+        macd_6135_val_df = processed_data.get('MACD_6135_VAL', pd.DataFrame())
+        if not macd_6135_val_df.empty:
+            # 列名已是 MACD_6135_DIF
+            ta_dfs_to_merge.append(macd_6135_val_df[['股票代码', 'MACD_6135_DIF']])
 
 
         # 3. KDJ, CCI, RSI, BOLL 的合并逻辑 (假设已实现)
@@ -548,21 +583,20 @@ class StockAnalyzer:
         # 对新的 TA 信号列填充空值
         for col in [
             'MACD_12269', 'MACD_6135',
-            'MACD_12269_DYN', 'MACD_12269_SLOPE', # <-- NEW COLUMNS
-            'MACD_6135_DYN', 'MACD_6135_SLOPE', # <-- NEW COLUMNS
+            'MACD_12269_DYN', 'MACD_12269_SLOPE', 'MACD_12269_DIF', # <-- NEW COLUMNS
+            'MACD_6135_DYN', 'MACD_6135_SLOPE', 'MACD_6135_DIF', # <-- NEW COLUMNS
             'KDJ_Signal', 'CCI_Signal', 'RSI_Signal', 'BOLL_Signal'
         ]:
             if col in final_df.columns:
-                # 动能状态填充为 '---'，斜率填充为 NaN (以便后续筛选或计算评分)
-                if 'SLOPE' in col:
-                    # 斜率是数值，不需要填充为 ''，保持 NaN
+                if 'SLOPE' in col or 'DIF' in col:
+                    # 斜率和 DIF 值是数值，保持 NaN 或进行数字填充（这里保持默认 NaN）
                     pass
                 elif 'DYN' in col:
                     final_df[col] = final_df[col].fillna('---')
                 else:
                     final_df[col] = final_df[col].fillna('')
             else:
-                if 'SLOPE' in col:
+                if 'SLOPE' in col or 'DIF' in col:
                     final_df[col] = np.nan # 数值型空列
                 elif 'DYN' in col:
                     final_df[col] = '---' # 字符型空列
@@ -637,8 +671,8 @@ class StockAnalyzer:
             print(f"[FATAL] 程序运行发生致命错误: {e}")
 
 # ==============================================================================
-# 运行主程序
+# 运行主程序 (如果您希望程序直接运行，请取消注释以下行)
 # ==============================================================================
-if __name__ == '__main__':
-    # 仅在实际运行时执行，这里可以作为代码展示的结束
-    pass
+# if __name__ == '__main__':
+#     analyzer = StockAnalyzer()
+#     analyzer.run()
