@@ -161,6 +161,45 @@ class StockAnalyzer:
 
         return cleaned_df
 
+    def _fetch_individual_industry_parallel(self, codes: List[str]) -> pd.DataFrame:
+        """复用 ThreadPoolExecutor 并行获取个股行业信息。"""
+        print(f"\n>>> 正在并发获取 {len(codes)} 只股票的行业分类信息...")
+
+        # 1. 尝试加载缓存
+        cache_name = f"Individual_Industry_Cache"
+        file_path = self._get_file_path(cache_name, cleaned=True)
+        cached_df = self._load_data_from_cache(file_path)
+        if not cached_df.empty:
+            return cached_df
+
+        results = []
+
+        def fetch_worker(code):
+            """单个股票获取任务"""
+            for _ in range(self.config.DATA_FETCH_RETRIES):
+                try:
+                    # 调用接口
+                    info_df = ak.stock_individual_info_em(symbol=code)
+                    if not info_df.empty:
+                        # 提取“行业”对应的值
+                        industry = info_df[info_df['item'] == '行业']['value'].values[0]
+                        return {'股票代码': code, '行业': industry}
+                except Exception:
+                    time.sleep(1)  # 遇错稍等
+            return {'股票代码': code, '行业': 'N/A'}
+
+        # 2. 复用类初始化时创建的 self.executor (MAX_WORKERS=15)
+        futures = {self.executor.submit(fetch_worker, code): code for code in codes}
+
+        for future in as_completed(futures):
+            results.append(future.result())
+
+        # 3. 汇总并保存
+        final_df = pd.DataFrame(results)
+        if not final_df.empty:
+            self._save_data_to_cache(final_df, file_path)
+        return final_df
+
     def _get_all_raw_data(self) -> Dict[str, pd.DataFrame]:
         """集中获取所有数据源。"""
         print("\n>>> 正在初始化数据获取和缓存检查...")
@@ -227,7 +266,7 @@ class StockAnalyzer:
             return pd.DataFrame()
 
         # 使用一个独立的缓存文件来存储合并后的成分股数据
-        cache_name = "TopIndustryConstituents_经清洗"
+        cache_name = "前十板块成分股"
         cleaned_file_path = self._get_file_path(cache_name, cleaned=True)
         cached_df = self._load_data_from_cache(cleaned_file_path)
         if not cached_df.empty:
@@ -289,7 +328,7 @@ class StockAnalyzer:
         end_date_str = end_date.strftime("%Y%m%d")
 
         # 缓存文件名增加代码数量和 "_经清洗" 后缀
-        cache_name = f"MACD_hist_data_cache_{len(codes)}"
+        cache_name = f"MACD_hist_data_cache"
         file_path = self._get_file_path(cache_name, cleaned=True)
         cached_df = self._load_data_from_cache(file_path)
 
@@ -1025,6 +1064,12 @@ class StockAnalyzer:
             final_df['TOP10行业']= final_df['股票代码'].apply(lambda x:'是' if str(x) in top_codes else '否')
         else:
             final_df['TOP10行业'] = '否'
+
+        industry_df = processed_data.get('individual_industry', pd.DataFrame())
+        if not industry_df.empty:
+            final_df = pd.merge(final_df, industry_df, on='股票代码', how='left')
+            final_df['行业'] = final_df['行业'].fillna('N/A')
+
         # 4. 过滤掉没有任何主要信号的股票
         def has_any_signal(row):
             # 这里的研报买入次数列在 run() 方法中已过滤，且在 merge 填充 NaN 为 0，故此处检查 > 0 即可
@@ -1058,7 +1103,7 @@ class StockAnalyzer:
             final_df.drop(columns=['当前价格'], inplace=True, errors='ignore')
 
         # 最终列顺序 (手动调整，确保最重要的信息在前)
-        base_cols = ['序号', '股票代码', '股票简称', '最新价']
+        base_cols = ['序号', '股票代码', '股票简称', '行业','最新价']
 
         signal_cols = [
             '强势股', '量价齐升', '连涨天数', '放量天数','TOP10行业',
@@ -1177,6 +1222,8 @@ class StockAnalyzer:
             ta_signals = self._process_ta_signals(filtered_codes_list, hist_df_all, spot_df)
             print(">>> 股票历史数据和技术指标分析完成。")
 
+            industry_info_df = self._fetch_individual_industry_parallel(filtered_codes_list)
+
             # 4. 保存技术指标信号到本地 TXT 文件
             self._save_ta_signals_to_txt(ta_signals)
 
@@ -1210,7 +1257,8 @@ class StockAnalyzer:
                 **raw_data,
                 **ta_signals,  # 技术指标信号
                 'processed_xstp_df': processed_xstp_df,
-                'processed_main_report': processed_main_report
+                'processed_main_report': processed_main_report,
+                'individual_industry': industry_info_df
             }
 
             consolidated_report = self._consolidate_data(processed_data)
