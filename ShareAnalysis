@@ -8,13 +8,17 @@ import warnings
 from typing import Callable, Dict, Any, List
 import pandas_ta as ta
 import numpy as np
-from tqdm import tqdm
+import xlsxwriter
 
 # 忽略 pandas 的 SettingWithCopyWarning
 warnings.filterwarnings('ignore', category=pd.errors.SettingWithCopyWarning)
 
-class Config:
 
+# ==============================================================================
+# 核心工具函数和配置
+# ==============================================================================
+class Config:
+    """程序配置类"""
 
     def __init__(self):
         self.HOME_DIRECTORY = os.path.expanduser('~')
@@ -22,7 +26,7 @@ class Config:
         self.TEMP_DATA_DIRECTORY = os.path.join(self.SAVE_DIRECTORY, 'ShareData')
         self.DATA_FETCH_RETRIES = 3
         self.DATA_FETCH_DELAY = 5  #
-        self.MAX_WORKERS = 30
+        self.MAX_WORKERS = 15
         self.CODE_ALIASES = {'代码': '股票代码', '证券代码': '股票代码', '股票代码': '股票代码'}
         # 别名已包含所有常见名称
         self.NAME_ALIASES = {'名称': '股票简称', '股票名称': '股票简称', '股票简称': '股票简称', '简称': '股票简称',
@@ -44,6 +48,9 @@ def format_stock_code(code: str) -> str:
     return code_str
 
 
+# ==============================================================================
+# 核心分析类 (集成 Fetching, Processing, Reporting)
+# ==============================================================================
 class StockAnalyzer:
 
     def __init__(self):
@@ -110,7 +117,7 @@ class StockAnalyzer:
             print(f"[FATAL] 所有重试均失败，返回空 DataFrame: {file_base_name}")
             return pd.DataFrame()
 
-
+        # 3. 清洗数据并保存到带有 "_经清洗" 后缀的缓存文件
         cleaned_df = self._clean_and_standardize(df, file_base_name)
         if not cleaned_df.empty:
             self._save_data_to_cache(cleaned_df, cleaned_file_path)
@@ -154,39 +161,40 @@ class StockAnalyzer:
 
         return cleaned_df
 
-    # 注意：需要在文件顶部添加：from tqdm import tqdm
-    from tqdm import tqdm
-
     def _fetch_individual_industry_parallel(self, codes: List[str]) -> pd.DataFrame:
-        """并发获取个股行业信息，并增加全局进度条。"""
+        """复用 ThreadPoolExecutor 并行获取个股行业信息。"""
+        print(f"\n>>> 正在并发获取 {len(codes)} 只股票的行业分类信息...")
+
+        # 1. 尝试加载缓存
         cache_name = f"Individual_Industry_Cache"
         file_path = self._get_file_path(cache_name, cleaned=True)
         cached_df = self._load_data_from_cache(file_path)
         if not cached_df.empty:
             return cached_df
 
-        print(f"\n>>> 开始并发获取 {len(codes)} 只股票的行业分类信息...")
         results = []
 
         def fetch_worker(code):
             """单个股票获取任务"""
             for _ in range(self.config.DATA_FETCH_RETRIES):
                 try:
+                    # 调用接口
                     info_df = ak.stock_individual_info_em(symbol=code)
                     if not info_df.empty:
+                        # 提取“行业”对应的值
                         industry = info_df[info_df['item'] == '行业']['value'].values[0]
                         return {'股票代码': code, '行业': industry}
                 except Exception:
-                    time.sleep(0.5)
+                    time.sleep(1)  # 遇错稍等
             return {'股票代码': code, '行业': 'N/A'}
 
-        with tqdm(total=len(codes), desc="获取行业信息", unit="只") as pbar:
-            futures = {self.executor.submit(fetch_worker, code): code for code in codes}
+        # 2. 复用类初始化时创建的 self.executor (MAX_WORKERS=15)
+        futures = {self.executor.submit(fetch_worker, code): code for code in codes}
 
-            for future in as_completed(futures):
-                results.append(future.result())
-                pbar.update(1)
+        for future in as_completed(futures):
+            results.append(future.result())
 
+        # 3. 汇总并保存
         final_df = pd.DataFrame(results)
         if not final_df.empty:
             self._save_data_to_cache(final_df, file_path)
@@ -320,7 +328,7 @@ class StockAnalyzer:
         end_date_str = end_date.strftime("%Y%m%d")
 
         # 缓存文件名增加代码数量和 "_经清洗" 后缀
-        cache_name = f"Hist_data_cache"
+        cache_name = f"MACD_hist_data_cache"
         file_path = self._get_file_path(cache_name, cleaned=True)
         cached_df = self._load_data_from_cache(file_path)
 
@@ -587,7 +595,29 @@ class StockAnalyzer:
                 continue
 
             try:
+                # === [新增] 量比计算与过滤逻辑 ===
+                # 计算 5 日均量（不含当日）
+                df['vol_ma5'] = df['volume'].rolling(window=5).mean().shift(1)
 
+                curr_vol = df['volume'].iloc[-1]
+                prev_vol_ma5 = df['vol_ma5'].iloc[-1]
+
+                # 计算今日涨跌幅 (用于过滤)
+                curr_pct_change = (df['close'].iloc[-1] / df['close'].iloc[-2] - 1) if len(df) > 1 else 0
+
+                # 计算量比数值
+                vol_ratio = 1.0 if pd.isna(prev_vol_ma5) or prev_vol_ma5 == 0 else curr_vol / prev_vol_ma5
+
+                # 判定状态标签
+                vol_status = "缩量" if vol_ratio < 0.8 else "温和" if vol_ratio < 1.5 else "放量"
+                if vol_ratio > 2.5: vol_status = "巨量"
+
+                # 【核心过滤】：如果股价上涨 且 量比 < 0.7 (严重无量上涨)，剔除该股
+                if curr_pct_change > 0 and vol_ratio < 0.7:
+                    continue  # 关键点：直接跳过，不参与后续计算，不计入报表
+
+
+                # === [量比逻辑结束] ===
                 df = self._custom_macd(df)
 
                 try:
@@ -725,7 +755,7 @@ class StockAnalyzer:
                         ta_signals['RSI'].append({'股票代码': code,
                                                   'RSI_Signal': f"RSI底背离 (Price低={curr_low}, RSI={curr_rsi:.1f}, 前RSI低={min_rsi_window:.1f})"})
 
-                    # 5. BOLL (低波/缩口) - 使用 pandas_ta
+                # 5. BOLL (低波/缩口) - 使用 pandas_ta
                 df.ta.bbands(append=True, length=20, std=2, close='close')
                 boll_cols = [col for col in df.columns if col.startswith('BBL_')]
                 if boll_cols:
@@ -1174,7 +1204,7 @@ class StockAnalyzer:
         print(f"股票分析程序启动 (Today: {self.today_str})")
 
         try:
-
+            # 1. 获取所有原始数据
             raw_data = self._get_all_raw_data()
 
             # 预处理主力研报数据
