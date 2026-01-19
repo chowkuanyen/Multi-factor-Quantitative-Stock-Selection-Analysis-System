@@ -111,6 +111,8 @@ Python 13+
 
 pip install akshare pandas pandas_ta numpy xlsxwriter
 
+git clone [https://github.com/paiyuyen/Multi-factor-Quantitative-Stock-Selection-Analysis-System.git](https://github.com/paiyuyen/Multi-factor-Quantitative-Stock-Selection-Analysis-System.git)
+
 python ShareAnalysis.py
 
 <br>
