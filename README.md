@@ -1,7 +1,7 @@
 <p align="center">
   <img src="https://github.com/paiyuyen/Multi-factor-Quantitative-Stock-Selection-Analysis-System/raw/main/Images/logo.png" alt="LOGO" width="50%">
   <br>
-  <b><h3>BAISYS 多因子A股量化分析报告</h3></b>
+  <b>BAISYS 多因子A股量化分析报告</b>
 </p>
 
 #2025年回望与2026年产品打磨规划
