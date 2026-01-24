@@ -4,19 +4,11 @@ from datetime import datetime, timedelta
 import time
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import warnings
 from typing import Callable, Dict, Any, List
-import pandas_ta as ta
 import numpy as np
-import xlsxwriter
-
-# 忽略 pandas 的 SettingWithCopyWarning
-warnings.filterwarnings('ignore', category=pd.errors.SettingWithCopyWarning)
+import ParallelUtils as  utils
 
 
-# ==============================================================================
-# 核心工具函数和配置
-# ==============================================================================
 class Config:
     """程序配置类"""
 
@@ -28,10 +20,8 @@ class Config:
         self.DATA_FETCH_DELAY = 5  #
         self.MAX_WORKERS = 15
         self.CODE_ALIASES = {'代码': '股票代码', '证券代码': '股票代码', '股票代码': '股票代码'}
-        # 别名已包含所有常见名称
         self.NAME_ALIASES = {'名称': '股票简称', '股票名称': '股票简称', '股票简称': '股票简称', '简称': '股票简称',
                              '简': '股票简称', '证券名称': '股票简称'}
-        # === 价格别名修复 v5：涵盖更多实时行情价格字段 ===
         self.PRICE_ALIASES = {'最新价': '最新价', '现价': '最新价', '当前价格': '最新价', '今收盘': '最新价',
                               '收盘': '最新价', '收盘价': '最新价'}
 
@@ -48,9 +38,6 @@ def format_stock_code(code: str) -> str:
     return code_str
 
 
-# ==============================================================================
-# 核心分析类 (集成 Fetching, Processing, Reporting)
-# ==============================================================================
 class StockAnalyzer:
 
     def __init__(self):
@@ -127,7 +114,7 @@ class StockAnalyzer:
     def _clean_and_standardize(self, df: pd.DataFrame, df_name: str) -> pd.DataFrame:
         """通用数据清洗和列名标准化。"""
         if df.empty: return df
-
+        df = utils._normalize_fund_data(df)
         # 1. 标准化列名：使用 Config 中的别名映射
         for old, new in self.config.CODE_ALIASES.items():
             if old in df.columns: df.rename(columns={old: new}, inplace=True)
@@ -162,39 +149,36 @@ class StockAnalyzer:
         return cleaned_df
 
     def _fetch_individual_industry_parallel(self, codes: List[str]) -> pd.DataFrame:
-        """复用 ThreadPoolExecutor 并行获取个股行业信息。"""
-        print(f"\n>>> 正在并发获取 {len(codes)} 只股票的行业分类信息...")
+        """重构：并行获取个股行业信息"""
 
-        # 1. 尝试加载缓存
+        # 1. 缓存检查 (保持原逻辑)
         cache_name = f"Individual_Industry_Cache"
         file_path = self._get_file_path(cache_name, cleaned=True)
         cached_df = self._load_data_from_cache(file_path)
         if not cached_df.empty:
             return cached_df
 
-        results = []
-
+        # 2. 定义单个 worker 函数 (闭包)
         def fetch_worker(code):
-            """单个股票获取任务"""
             for _ in range(self.config.DATA_FETCH_RETRIES):
                 try:
-                    # 调用接口
                     info_df = ak.stock_individual_info_em(symbol=code)
                     if not info_df.empty:
-                        # 提取“行业”对应的值
                         industry = info_df[info_df['item'] == '行业']['value'].values[0]
                         return {'股票代码': code, '行业': industry}
                 except Exception:
-                    time.sleep(1)  # 遇错稍等
+                    time.sleep(1)
             return {'股票代码': code, '行业': 'N/A'}
 
-        # 2. 复用类初始化时创建的 self.executor (MAX_WORKERS=15)
-        futures = {self.executor.submit(fetch_worker, code): code for code in codes}
+        # 3. 调用通用并发工具
+        results = utils.run_with_thread_pool(
+            items=codes,
+            worker_func=fetch_worker,
+            max_workers=self.config.MAX_WORKERS,
+            desc="获取个股行业信息"
+        )
 
-        for future in as_completed(futures):
-            results.append(future.result())
-
-        # 3. 汇总并保存
+        # 4. 汇总并保存
         final_df = pd.DataFrame(results)
         if not final_df.empty:
             self._save_data_to_cache(final_df, file_path)
@@ -261,11 +245,11 @@ class StockAnalyzer:
         return pd.DataFrame()
 
     def _get_top_industry_constituents(self, industry_board_df: pd.DataFrame) -> pd.DataFrame:
-        """获取涨幅前10板块的成分股 (已优化：使用带重试的 fetcher)。"""
+        """重构：获取涨幅前10板块的成分股"""
         if industry_board_df.empty or '板块名称' not in industry_board_df.columns:
             return pd.DataFrame()
 
-        # 使用一个独立的缓存文件来存储合并后的成分股数据
+        # 1. 缓存检查
         cache_name = "前十板块成分股"
         cleaned_file_path = self._get_file_path(cache_name, cleaned=True)
         cached_df = self._load_data_from_cache(cleaned_file_path)
@@ -273,132 +257,106 @@ class StockAnalyzer:
             return cached_df
 
         top_industries = industry_board_df.sort_values(by='涨跌幅', ascending=False).head(10)
-        all_constituents = []
+        # 将 DataFrame 的行转为字典列表，便于传给 worker
+        industry_list = top_industries.to_dict('records')
 
-        # 使用 ThreadPoolExecutor 并行获取成分股
-        future_to_industry = {
-            self.executor.submit(
-                # 调用新的带重试的辅助函数
-                self._safe_fetch_constituents,
-                symbol=row['板块名称']
-            ): row['板块名称']
-            for _, row in top_industries.iterrows()
-        }
+        # 2. 定义 worker
+        def fetch_worker(row):
+            industry_name = row['板块名称']
+            # 调用原本类中定义的 _safe_fetch_constituents
+            constituents_df = self._safe_fetch_constituents(symbol=industry_name)
 
-        for future in as_completed(future_to_industry):
-            industry_name = future_to_industry[future]
-            try:
-                constituents_df = future.result()  # 这里的 result 是已经尝试重试后的结果
-                if constituents_df is not None and not constituents_df.empty:
-                    if '代码' in constituents_df.columns:
-                        constituents_df.rename(columns={'代码': '股票代码'}, inplace=True)
+            if constituents_df is not None and not constituents_df.empty:
+                if '代码' in constituents_df.columns:
+                    constituents_df.rename(columns={'代码': '股票代码'}, inplace=True)
 
-                    # 基础清洗和标准化：代码格式化
-                    if '股票代码' in constituents_df.columns:
-                        constituents_df['股票代码'] = constituents_df['股票代码'].astype(str).str.zfill(6)
-                        constituents_df['所属板块'] = industry_name
+                if '股票代码' in constituents_df.columns:
+                    constituents_df['股票代码'] = constituents_df['股票代码'].astype(str).str.zfill(6)
+                    constituents_df['所属板块'] = industry_name
+                    # 返回清洗后的小 DataFrame
+                    return constituents_df[['股票代码', '所属板块']].drop_duplicates()
+            return None
 
-                    # 仅保留代码和板块信息，并去重
-                    cleaned_constituents = constituents_df[['股票代码', '所属板块']].drop_duplicates()
-                    all_constituents.append(cleaned_constituents)
-                else:
-                    print(
-                        f"[WARN] 警告：获取 {industry_name} 的成分股失败或数据为空 (已重试 {self.config.DATA_FETCH_RETRIES} 次)。")
+        # 3. 调用并发工具
+        results = utils.run_with_thread_pool(
+            items=industry_list,
+            worker_func=fetch_worker,
+            max_workers=self.config.MAX_WORKERS,
+            desc="获取板块成分股"
+        )
 
-            except Exception as e:
-                # 理论上这里的 Exception 应该很少触发，因为重试逻辑已经在 _safe_fetch_constituents 中处理
-                print(f"[ERROR] 错误：获取 {industry_name} 的成分股时发生未知错误: {e}")
-
-        if all_constituents:
-            final_df = pd.concat(all_constituents, ignore_index=True).drop_duplicates(subset=['股票代码'])
-            # 保存到缓存
+        # 4. 合并结果
+        if results:
+            final_df = pd.concat(results, ignore_index=True).drop_duplicates(subset=['股票代码'])
             self._save_data_to_cache(final_df, cleaned_file_path)
             return final_df
         return pd.DataFrame()
 
     def _fetch_hist_data_parallel(self, codes: List[str], days: int) -> pd.DataFrame:
-        """
-        并行获取指定股票的历史数据，并强制将 OHLCV 列名统一为英文小写。
-        """
-        print(f"\n正在为 {len(codes)} 只股票下载 {days} 天的历史数据...")
+        """重构：并行获取历史数据"""
 
+        # 1. 准备日期参数
         end_date = datetime.now()
         start_date = end_date - timedelta(days=days)
         start_date_str = start_date.strftime("%Y%m%d")
         end_date_str = end_date.strftime("%Y%m%d")
 
-        # 缓存文件名增加代码数量和 "_经清洗" 后缀
+        # 2. 缓存检查 (保持原逻辑)
         cache_name = f"MACD_hist_data_cache"
         file_path = self._get_file_path(cache_name, cleaned=True)
         cached_df = self._load_data_from_cache(file_path)
 
         if not cached_df.empty:
-            # FIX: 历史数据无论来自哪里，都使用标准英文列名
-            # 确保 'date' 字段存在且格式正确
-            if 'date' in cached_df.columns:
-                cached_df['date'] = pd.to_datetime(cached_df['date']).dt.strftime('%Y-%m-%d')
-
-            # 确保关键英文列存在
             if 'close' in cached_df.columns and 'open' in cached_df.columns:
                 return cached_df
             else:
                 print("[WARN] 历史数据缓存文件缺少关键英文列，将重新获取。")
 
-        all_data = []
-        future_to_code = {}
-        with ThreadPoolExecutor(max_workers=self.config.MAX_WORKERS) as executor:
-            for code in codes:
-                future = executor.submit(
-                    ak.stock_zh_a_hist_tx,
+        # 3. 定义 worker
+        def fetch_worker(code):
+            try:
+                hist_df = ak.stock_zh_a_hist_tx(
                     symbol=format_stock_code(code),
                     start_date=start_date_str,
                     end_date=end_date_str,
-                    adjust="hfq"  # 前复权
+                    adjust="hfq"
                 )
-                future_to_code[future] = code
-
-        for future in as_completed(future_to_code):
-            code = future_to_code[future]
-            try:
-                hist_df = future.result()
                 if hist_df is not None and not hist_df.empty:
-
-                    # **核心修复点：强制统一列名为英文小写**
+                    # 标准化列名
                     hist_df.rename(columns={
                         'date': 'date', '日期': 'date',
                         'open': 'open', '开盘': 'open',
                         'close': 'close', '收盘': 'close',
                         'high': 'high', '最高': 'high',
                         'low': 'low', '最低': 'low',
-                        'volume': 'volume', '成交量': 'volume', 'amount': 'volume',  # 假设 amount 是成交量
+                        'volume': 'volume', '成交量': 'volume', 'amount': 'volume',
                     }, inplace=True, errors='ignore')
 
                     hist_df['股票代码'] = code
-
-                    # 确保日期是字符串格式
                     if 'date' in hist_df.columns:
                         hist_df['date'] = pd.to_datetime(hist_df['date']).dt.strftime('%Y-%m-%d')
 
-                    # 只保留需要的列
                     cols_to_keep = ['date', 'open', 'close', 'high', 'low', 'volume', '股票代码']
-                    hist_df = hist_df[[col for col in cols_to_keep if col in hist_df.columns]]
-
-                    all_data.append(hist_df)
-
-            except Exception as e:
-                # print(f"[ERROR] 错误：获取 {code} 的历史数据时出错: {e}")
+                    return hist_df[[col for col in cols_to_keep if col in hist_df.columns]]
+            except Exception:
                 pass
+            return None
 
-        if all_data:
-            merged_df = pd.concat(all_data, ignore_index=True)
-            # 保存到缓存
+        # 4. 调用并发工具
+        results = utils.run_with_thread_pool(
+            items=codes,
+            worker_func=fetch_worker,
+            max_workers=self.config.MAX_WORKERS,
+            desc=f"下载 {days} 天历史数据"
+        )
+
+        # 5. 合并结果
+        if results:
+            merged_df = pd.concat(results, ignore_index=True)
             self._save_data_to_cache(merged_df, file_path)
             return merged_df
         return pd.DataFrame()
 
-    # ==========================================================================
-    # [自定义/修改] MACD 计算方法 (同时计算 12269 和 6135, 区分零轴上/下金叉)
-    # ==========================================================================
     def _custom_macd(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         [自定义实现] 同时计算 MACD 标准周期 (12, 26, 9) 和加速周期 (6, 13, 5) 的快慢线金叉信号。
@@ -462,9 +420,7 @@ class StockAnalyzer:
 
         return df
 
-    # ==========================================================================
-    # [新增] MACD 动能状态计算辅助函数 (源自 1.py)
-    # ==========================================================================
+
     def _calculate_macd_momentum(self, df: pd.DataFrame, dif_col: str, dea_col: str) -> str:
         """
         计算 MACD 动能状态: 加速上涨/减速上涨/加速下跌/减速下跌
@@ -497,9 +453,7 @@ class StockAnalyzer:
 
         return momentum_state
 
-    # ==========================================================================
-    # [新增/改进] CCI 专业化分类函数
-    # ==========================================================================
+
     def _classify_cci_level(self, cci_value: float) -> str:
         """根据CCI值，将其分类为专业的市场状态术语。"""
         if pd.isna(cci_value):
@@ -553,9 +507,7 @@ class StockAnalyzer:
             except Exception as e:
                 print(f"[ERROR] 保存 {indicator_name} 信号文件失败: {e}")
 
-    # ==========================================================================
-    # [修改] _process_ta_signals: 提取详细 MACD 信号
-    # ==========================================================================
+
     def _process_ta_signals(self, all_codes: List[str], hist_df_all: pd.DataFrame, spot_df: pd.DataFrame) -> Dict[
         str, pd.DataFrame]:
         """计算并提取所有技术指标信号。"""
@@ -891,8 +843,6 @@ class StockAnalyzer:
         # 合并名称到最终报告 (按代码合并，保证基础表的简称是正确的)
         final_df = pd.merge(final_df, all_names, on='股票代码', how='left')
 
-        # --- V5 价格获取和清洗增强：按用户要求使用 '股票简称' 进行关联 ---
-
         # 1. 从实时行情数据中提取用于价格合并的列 (简称和最新价)
         if '股票简称' not in spot_df.columns:
             # 严重警告：如果实时行情数据中没有股票简称，则回退到使用股票代码。
@@ -933,10 +883,7 @@ class StockAnalyzer:
         final_df['股票简称'] = final_df['股票简称'].fillna('N/A')
         # 将价格的 NaN 填充为 'N/A'
         final_df['最新价'] = final_df['最新价'].fillna('N/A')
-        # --- V5 价格获取和清洗增强结束 ---
 
-        # 3. 合并信号和细节 (以下合并仍然使用股票代码，因为它更可靠)
-        # A. 主力研报信号 (使用买入次数)
         report_df = processed_data['processed_main_report'][['股票代码', '机构投资评级(近六个月)-买入']]
         report_df.rename(columns={'机构投资评级(近六个月)-买入': '研报买入次数'}, inplace=True)
         final_df = pd.merge(final_df, report_df, on='股票代码', how='left')
@@ -946,7 +893,7 @@ class StockAnalyzer:
         xstp_df = processed_data['processed_xstp_df']
         xstp_cols = ['股票代码', '完全多头排列', '当前价格', '10日均线最新价', '30日均线最新价', '60日均线最新价']
 
-        # V8 修复: 严格检查数据框是否包含数据和关键合并列，否则跳过合并。
+
         if not xstp_df.empty and '股票代码' in xstp_df.columns:
             # 1. 筛选出实际存在的列
             cols_present = [col for col in xstp_cols if col in xstp_df.columns]
@@ -958,7 +905,7 @@ class StockAnalyzer:
             # 3. 执行合并
             final_df = pd.merge(final_df, merge_df, on='股票代码', how='left')
 
-        # V9 修复：确保 '完全多头排列' 列始终存在，无论 merge 是否跳过。
+
         if '完全多头排列' not in final_df.columns:
             final_df['完全多头排列'] = '否'
         else:
@@ -987,6 +934,34 @@ class StockAnalyzer:
             final_df = pd.merge(final_df, merge_df_20, on='股票简称', how='left')
             final_df['20日资金流入'] = final_df['资金流入净额']
             final_df.drop(columns=['资金流入净额'], errors='ignore', inplace=True)
+
+        f5_col, f10_col, f20_col = '5日资金流入', '10日资金流入', '20日资金流入'
+        if all(col in final_df.columns for col in [f5_col, f10_col, f20_col]):
+            def calculate_trend(row):
+                # 因为之前清洗过，这里直接取 float 即可
+                v5 = float(row[f5_col]) if not pd.isna(row[f5_col]) else 0
+                v10 = float(row[f10_col]) if not pd.isna(row[f10_col]) else 0
+                v20 = float(row[f20_col]) if not pd.isna(row[f20_col]) else 0
+
+                # 业务逻辑：(5日>10日 或 5日>20日) 且 5日为正流入
+                if (v5 > v10 or v5 > v20) and v5 > 0:
+                    return "动能增强"
+                elif v5 > 0:
+                    return "流入"
+                else:
+                    return "谨慎观察"
+
+            # 创建新列
+            final_df['资金趋势向上'] = final_df.apply(calculate_trend, axis=1)
+
+            # 调整列顺序，将参考列放到资金列旁边便于对比
+            cols = list(final_df.columns)
+            if '资金趋势向上' in cols:
+                target_idx = cols.index(f5_col)
+                cols.insert(target_idx + 1, cols.pop(cols.index('资金趋势向上')))
+                final_df = final_df[cols]
+
+
 
         # D. 强势股池
         if not processed_data['strong_stocks_raw'].empty:
@@ -1278,9 +1253,6 @@ class StockAnalyzer:
                                                                      universe_codes_set)
             raw_data['ljqs_raw'] = filter_df_by_universe(raw_data['ljqs_raw'], universe_codes_set)
             raw_data['cxfl_raw'] = filter_df_by_universe(raw_data['cxfl_raw'], universe_codes_set)
-
-            # C. 行业板块成分股 (此表只用于报告输出，但过滤可确保一致性)
-           #raw_data['top_industry_cons_df'] = filter_df_by_universe(raw_data['top_industry_cons_df'],universe_codes_set)
 
             # 5. 合并所有数据源和信号
             processed_data = {
