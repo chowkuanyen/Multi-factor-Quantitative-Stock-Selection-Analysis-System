@@ -77,7 +77,7 @@ class IndustryFlowAnalyzer:
         if os.path.exists(self.cache_path):
             print(f">>> 发现本地缓存：{self.cache_filename}，正在加载...")
             try:
-                return pd.read_csv(self.cache_path, sep='\t', encoding='utf-8')
+                return pd.read_csv(self.cache_path, sep='|', encoding='utf-8')
             except Exception as e:
                 print(f"[WARN] 缓存加载失败: {e}")
 
@@ -138,7 +138,7 @@ class IndustryFlowAnalyzer:
 
         try:
             if not os.path.exists(self.config.TEMP_DATA_DIRECTORY): os.makedirs(self.config.TEMP_DATA_DIRECTORY)
-            result.to_csv(self.cache_path, sep='\t', index=False, encoding='utf-8')
+            result.to_csv(self.cache_path, sep='|', index=False, encoding='utf-8')
             print(f">>> 深度分析完成，结果存至: {self.cache_filename}")
         except Exception as e:
             print(f"[WARN] 保存失败: {e}")
