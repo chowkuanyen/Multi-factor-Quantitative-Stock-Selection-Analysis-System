@@ -66,8 +66,8 @@ class MACDAnalyzer:
 
     return df
 
-
- def _calculate_macd_momentum(self, df: pd.DataFrame, dif_col: str, dea_col: str) -> str:
+ @staticmethod
+ def _calculate_macd_momentum( df: pd.DataFrame, dif_col: str, dea_col: str) -> str:
     """
     计算 MACD 动能状态: 加速上涨/减速上涨/加速下跌/减速下跌
     """
