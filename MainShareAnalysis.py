@@ -154,37 +154,64 @@ class StockAnalyzer:
     def _fetch_individual_industry_parallel(self, codes: List[str]) -> pd.DataFrame:
         """重构：并行获取个股行业信息"""
 
-        # 1. 缓存检查 (保持原逻辑)
-        cache_name = f"Individual_Industry_Cache"
-        file_path = self._get_file_path(cache_name, cleaned=True)
-        cached_df = self._load_data_from_cache(file_path)
-        if not cached_df.empty:
-            return cached_df
+        from Ts_GetStockBasicinfo import TushareStockManager  # 局部导入避免循环引用
 
-        # 2. 定义单个 worker 函数 (闭包)
-        def fetch_worker(code):
-            for _ in range(self.config.DATA_FETCH_RETRIES):
-                try:
-                    info_df = ak.stock_individual_info_em(symbol=code)
-                    if not info_df.empty:
-                        industry = info_df[info_df['item'] == '行业']['value'].values[0]
-                        return {'股票代码': code, '行业': industry}
-                except Exception:
-                    time.sleep(1)
-            return {'股票代码': code, '行业': 'N/A'}
+        # 1. 定义文件路径
+        dict_file_path = os.path.join(self.temp_dir, 'StockIndes.txt')
 
-        # 3. 调用通用并发工具
-        results = utils.run_with_thread_pool(
-            items=codes,
-            worker_func=fetch_worker,
-            max_workers=self.config.MAX_WORKERS,
-            desc="获取个股行业信息"
-        )
+        # 2. 判断文件是否存在，不存在则调用 TESTing.py 获取
+        if not os.path.exists(dict_file_path):
+            print(f"未发现本地字典文件，启动 Tushare 下载逻辑...")
+            # 建议将 TOKEN 配置在 Config 类中，此处演示直接传入
+            # token = self.config.TUSHARE_TOKEN
+            token = "f4422b90a91c02d7dc68dd24f066988064d7307790f200243822cac3"
 
-        # 4. 汇总并保存
-        final_df = pd.DataFrame(results)
-        if not final_df.empty:
-            self._save_data_to_cache(final_df, file_path)
+            try:
+                manager = TushareStockManager(token)
+                # 根据你的描述，字段为：股票代码|股票简称|行业|市场
+                manager.get_basic_data(list_status='L', save_path=dict_file_path)
+            except Exception as e:
+                print(f"[ERROR] 调用 Tushare 接口失败: {e}")
+                return pd.DataFrame(columns=['股票代码', '行业'])
+
+        # 3. 加载本地字典文件
+        try:
+            # 假设 StockIndes.txt 格式为：股票代码|股票简称|行业|市场
+            dict_df = pd.read_csv(
+                dict_file_path,
+                sep='|',
+                encoding='utf-8-sig',
+                dtype={'股票代码': str, 'ts_code': str}  # 兼容处理
+            )
+
+            # 统一列名以备匹配
+            if 'ts_code' in dict_df.columns and '股票代码' not in dict_df.columns:
+                dict_df.rename(columns={'ts_code': '股票代码'}, inplace=True)
+            if 'industry' in dict_df.columns and '行业' not in dict_df.columns:
+                dict_df.rename(columns={'industry': '行业'}, inplace=True)
+
+            # 只取匹配需要的核心列
+            dict_df = dict_df[['股票代码', '行业']].drop_duplicates(subset=['股票代码'])
+
+        except Exception as e:
+            print(f"[ERROR] 读取本地字典文件失败: {e}")
+            return pd.DataFrame(columns=['股票代码', '行业'])
+
+        # 4. 匹配个股行业 (使用 Pandas Merge 效率最高)
+        # 将传入的 codes 转换为 DataFrame
+        input_df = pd.DataFrame(codes, columns=['股票代码'])
+        input_df['股票代码'] = input_df['股票代码'].astype(str).str.zfill(6)
+        dict_df['股票代码'] = dict_df['股票代码'].astype(str).str.zfill(6)
+
+        # 执行左连接：主程序股票左关联行业字典
+        final_df = pd.merge(input_df, dict_df, on='股票代码', how='left')
+
+        # 填充缺失行业
+        final_df['行业'] = final_df['行业'].fillna('N/A')
+
+        match_count = final_df[final_df['行业'] != 'N/A'].shape[0]
+        print(f"  - 行业数据匹配完成：总计 {len(codes)} 只，成功匹配 {match_count} 只。")
+
         return final_df
 
     def _get_all_raw_data(self) -> Dict[str, pd.DataFrame]:
@@ -216,16 +243,36 @@ class StockAnalyzer:
 
         # 3. 行业板块数据
         print("\n>>> 正在获取行业板块名称并保存至本地...")
-        industry_board_df = ak.stock_board_industry_name_em()
+        # 定义文件路径
         industry_info_filename = f"行业板块信息_{self.today_str}.txt"
         industry_info_path = os.path.join(self.temp_dir, industry_info_filename)
+        industry_board_df = pd.DataFrame()
 
-        try:
-            industry_board_df.to_csv(industry_info_path, sep='|', index=False, encoding='utf-8-sig')
-            print(f"  - 成功打印行业板块信息至: {industry_info_filename}")
-        except Exception as e:
-            print(f"[ERROR] 保存行业板块信息失败: {e}")
+        # --- 新增逻辑：判断本地是否有缓存 ---
+        if os.path.exists(industry_info_path):
+            try:
+                print(f"  - 发现本地缓存文件，正在读取: {industry_info_filename}")
+                industry_board_df = pd.read_csv(industry_info_path, sep='|', encoding='utf-8-sig')
+            except Exception as e:
+                print(f"  - [WARN] 读取本地缓存失败: {e}，将尝试重新获取...")
 
+        # --- 如果没有读取到数据（文件不存在 或 读取失败），则调用接口 ---
+        if industry_board_df.empty:
+            print(f"  - 本地无有效缓存，正在通过 Akshare 接口获取...")
+            try:
+                industry_board_df = ak.stock_board_industry_name_em()
+
+                # 获取成功后保存
+                if not industry_board_df.empty:
+                    try:
+                        industry_board_df.to_csv(industry_info_path, sep='|', index=False, encoding='utf-8-sig')
+                        print(f"  - 获取成功并已保存至: {industry_info_filename}")
+                    except Exception as e:
+                        print(f"  - [ERROR] 保存文件失败: {e}")
+            except Exception as e:
+                print(f"  - [ERROR] 调用行业板块接口失败: {e}")
+
+        # 后续处理保持不变
         data['top_industry_cons_df'] = self._get_top_industry_constituents(industry_board_df)
         data['industry_board_df'] = industry_board_df
         return data
@@ -1096,6 +1143,42 @@ class StockAnalyzer:
                 print("未找到任何有效的股票代码，流程终止。")
                 return
 
+                # --- 筹码分布数据获取 (带缓存逻辑) ---
+            print("\n>>> 正在准备筹码分布数据...")
+
+                # 定义缓存文件路径
+            chip_file_name = f"筹码分布数据_{self.today_str}.txt"
+            chip_file_path = os.path.join(self.temp_dir, chip_file_name)
+            chip_data_df = pd.DataFrame()
+
+                # 1. 判断本地是否有缓存
+            if os.path.exists(chip_file_path):
+                 try:
+                        print(f"  - 发现本地筹码分布缓存，正在读取: {chip_file_name}")
+                        # 注意：读取时指定 dtype，防止股票代码前面的 0 丢失
+                        chip_data_df = pd.read_csv(chip_file_path, sep='|', encoding='utf-8-sig',
+                                                   dtype={'股票代码': str})
+                 except Exception as e:
+                        print(f"  - [WARN] 读取筹码分布缓存失败: {e}，将尝试重新获取...")
+
+                # 2. 如果没有读取到数据（文件不存在 或 读取失败），则调用接口
+            if chip_data_df.empty:
+                    print(f"  - 本地无有效缓存，正在通过接口并发获取筹码分布数据 (这可能需要一些时间)...")
+
+                    # 初始化分析器并获取数据
+                    chip_analyzer = dist.ChipDistributionAnalyzer(self.config)
+                    chip_data_df = chip_analyzer.fetch_chip_data_parallel(filtered_codes_list)
+
+                    # 3. 获取成功后保存到本地
+                    if not chip_data_df.empty:
+                        try:
+                            chip_data_df.to_csv(chip_file_path, sep='|', index=False, encoding='utf-8-sig')
+                            print(f"  - 筹码数据获取成功并已保存至: {chip_file_name}")
+                        except Exception as e:
+                            print(f"  - [ERROR] 保存筹码分布文件失败: {e}")
+
+            # --- 筹码分布逻辑结束 ---
+
             # 历史数据获取和技术指标计算
             hist_df_all = self._fetch_hist_data_parallel(filtered_codes_list, days=90)
 
@@ -1105,8 +1188,7 @@ class StockAnalyzer:
 
             industry_info_df = self._fetch_individual_industry_parallel(filtered_codes_list)
 
-            chip_analyzer = dist.ChipDistributionAnalyzer(self.config)
-            chip_data_df = chip_analyzer.fetch_chip_data_parallel(filtered_codes_list)
+
 
             # 保存技术指标信号到本地 TXT 文件
             self._save_ta_signals_to_txt(ta_signals)
