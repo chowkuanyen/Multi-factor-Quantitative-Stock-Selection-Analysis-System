@@ -164,7 +164,7 @@ class StockAnalyzer:
             print(f"未发现本地字典文件，启动 Tushare 下载逻辑...")
             # 建议将 TOKEN 配置在 Config 类中，此处演示直接传入
             # token = self.config.TUSHARE_TOKEN
-            token = "f4422b90a91c02d7dc68dd24f066988064d7307790f200243822cac3"
+            token = "注册tushare可以得到120积分,够用"
 
             try:
                 manager = TushareStockManager(token)
