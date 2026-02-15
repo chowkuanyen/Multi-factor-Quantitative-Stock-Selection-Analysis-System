@@ -1,0 +1,97 @@
+import urllib.parse
+
+import pandas as pd
+from sqlalchemy import create_engine, text
+import io
+
+
+class QuantDBManager:
+
+    def __init__(self, user, password, host, port, db_name):
+        # 1. 关键：对密码进行 URL 转义
+        # 如果密码里有特殊字符（如 ! @ #），不转义会导致连接串解析失败触发 GBK 报错
+        safe_password = urllib.parse.quote_plus(str(password))
+
+        # 2. 构建连接字符串
+        self.conn_str = f"postgresql+psycopg2://{user}:{safe_password}@{host}:{port}/{db_name}"
+
+        # 3. 核心修复：强制客户端编码为 UTF8，并增加连接超时
+        self.engine = create_engine(
+            self.conn_str,
+            connect_args={
+                'connect_timeout': 10,
+                'client_encoding': 'utf8'
+            },
+            pool_pre_ping=True
+        )
+
+    def safe_insert_data(self, df, table_name, date_column, today_str):
+        """
+        幂等写入：先删除今天的数据，再使用快速 COPY 插入
+        """
+        if df is None or df.empty:
+            print(f"  - [数据库] 表 {table_name} 无有效数据，跳过写入。")
+            return
+
+        # 1. 数据预处理
+        df_to_save = df.copy()
+
+
+        df_to_save = df_to_save.reset_index(drop=True)
+
+
+        if date_column not in df_to_save.columns:
+            df_to_save[date_column] = today_str
+
+
+        with self.engine.connect() as conn:
+            trans = conn.begin()
+            try:
+                # 删除当天的旧数据，实现覆盖式更新
+                delete_query = text(f"DELETE FROM {table_name} WHERE {date_column} = :today")
+                result = conn.execute(delete_query, {"today": today_str})
+                trans.commit()
+                print(f"  - [数据库] {table_name} 清理旧记录: {result.rowcount} 条")
+            except Exception as e:
+                trans.rollback()
+                print(f"  - [数据库错误] {table_name} 清理失败: {e}")
+                return
+
+
+        try:
+            self._fast_pg_copy(df_to_save, table_name)
+            print(f"  - [数据库] {table_name} 成功插入新数据: {len(df_to_save)} 条")
+        except Exception as e:
+            print(f"  - [数据库错误] {table_name} COPY 写入失败: {e}")
+
+    def _fast_pg_copy(self, df, table_name):
+        """
+        内部方法：利用 PostgreSQL 的 COPY 协议实现秒级入库
+        """
+        output = io.StringIO()
+        df.to_csv(output, sep='\t', header=False, index=False,encoding='utf-8')
+        output.seek(0)
+
+        raw_conn = self.engine.raw_connection()
+        try:
+            cursor = raw_conn.cursor()
+
+            # 必须显式指定列名，确保 DataFrame 的列顺序与 SQL 语句中的列顺序完全一致
+            columns = [f'"{col}"' for col in df.columns]
+            copy_sql = f"COPY {table_name} ({', '.join(columns)}) FROM STDIN WITH CSV DELIMITER '\t'"
+
+            # 使用 copy_expert 执行内存流拷贝
+            cursor.copy_expert(copy_sql, output)
+            raw_conn.commit()
+        except Exception as e:
+            raw_conn.rollback()
+            raise e
+        finally:
+            cursor.close()
+            raw_conn.close()
+
+    def close(self):
+        """释放连接池"""
+        if self.engine:
+            self.engine.dispose()
+            print("  - [数据库] 连接池已释放。")
