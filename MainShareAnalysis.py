@@ -1,17 +1,19 @@
 import akshare as ak
 import pandas as pd
+import pandas_ta as ta
 from datetime import datetime, timedelta
 import time
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Dict, Any, List
-import numpy as np
-import ParallelUtils as utils
-import pandas_ta as ta
+from DataManager import ParallelUtils as utils
 import Industrytrending as industry
 import Distribution as dist
 from MACDAnalyzer import MACDAnalyzer
-
+from   DataManager import DatabaseWriter
+from   DataManager import QuantDataPerformer
+from   FormatManager import Parse_Currency
+import psycopg2
 class Config:
     """程序配置类"""
 
@@ -239,7 +241,7 @@ class StockAnalyzer:
         # 2. 均线突破数据 (Akshare接口参数不同，需分开获取)
         data['xstp_10_raw'] = self._safe_ak_fetch(ak.stock_rank_xstp_ths, "向上突破10日均线", symbol="10日均线")
         data['xstp_30_raw'] = self._safe_ak_fetch(ak.stock_rank_xstp_ths, "向上突破30日均线", symbol="30日均线")
-        data['xstp_60_raw'] = self._safe_ak_fetch(ak.stock_rank_xstp_ths, "向上突破60日均线", symbol="30日均线")
+        data['xstp_60_raw'] = self._safe_ak_fetch(ak.stock_rank_xstp_ths, "向上突破60日均线", symbol="60日均线")
 
         # 3. 行业板块数据
         print("\n>>> 正在获取行业板块名称并保存至本地...")
@@ -467,7 +469,7 @@ class StockAnalyzer:
         print(f"\n正在对 {len(all_codes)} 只股票进行技术分析...")
 
         ta_signals = {'MACD_12269': [], 'MACD_6135': [], 'KDJ': [], 'CCI': [], 'RSI': [], 'BOLL': [],
-                      'MACD_DIF_MOMENTUM': []}  # <== 新增这一项
+                      'MACD_DIF_MOMENTUM': []}
 
         if hist_df_all.empty:
             print("[WARN] 历史数据为空，跳过技术分析。")
@@ -481,7 +483,7 @@ class StockAnalyzer:
             # df 现在应该已经包含了 'open', 'close', 'high', 'low' 等标准列名
             df = hist_df_all[hist_df_all['股票代码'] == code].copy()
 
-            if df.empty or len(df) < 30:  # 至少需要30条数据用于BOLL和KDJ
+            if df.empty or len(df) < 30:
                 continue
 
             # 确保所需列是数字类型 (使用英文列名)
@@ -841,9 +843,9 @@ class StockAnalyzer:
         if all(col in final_df.columns for col in [f5_col, f10_col, f20_col]):
             def calculate_trend(row):
                 # 因为之前清洗过，这里直接取 float 即可
-                v5 = float(row[f5_col]) if not pd.isna(row[f5_col]) else 0
-                v10 = float(row[f10_col]) if not pd.isna(row[f10_col]) else 0
-                v20 = float(row[f20_col]) if not pd.isna(row[f20_col]) else 0
+                v5 = Parse_Currency.Parse_Currency.parse_money_str(row[f5_col])
+                v10 = Parse_Currency.Parse_Currency.parse_money_str(row[f10_col])
+                v20 = Parse_Currency.Parse_Currency.parse_money_str(row[f20_col])
 
                 # 业务逻辑：(5日>10日 或 5日>20日) 且 5日为正流入
                 if (v5 > v10 or v5 > v20) and v5 > 0:
@@ -995,7 +997,7 @@ class StockAnalyzer:
         # 5. 整理输出并排序 (按研报买入次数、连涨天数、放量天数降序排序)
         final_df.sort_values(by=['研报买入次数', '连涨天数', '放量天数'], ascending=[False, False, False], inplace=True)
         final_df.reset_index(drop=True, inplace=True)
-        final_df.insert(0, '序号', range(1, len(final_df) + 1))
+
 
         final_df['完整股票代码'] = final_df['股票代码'].apply(format_stock_code)
         final_df['股票链接'] = "https://hybrid.gelonghui.com/stock-check/" + final_df['完整股票代码']
@@ -1007,7 +1009,7 @@ class StockAnalyzer:
             final_df.drop(columns=['当前价格'], inplace=True, errors='ignore')
 
         # 最终列顺序 (手动调整，确保最重要的信息在前)
-        base_cols = ['序号', '股票代码', '股票简称', '行业', '最新价', '获利比例', '90集中度', '平均成本', '筹码状态']
+        base_cols = [  '股票代码', '股票简称', '行业', '最新价', '获利比例', '90集中度', '平均成本', '筹码状态']
 
         signal_cols = [
             '强势股', '量价齐升', '连涨天数', '放量天数', 'TOP10行业',
@@ -1217,7 +1219,7 @@ class StockAnalyzer:
             # 5. 合并所有数据源和信号
             processed_data = {
                 **raw_data,
-                **ta_signals,  # 技术指标信号
+                **ta_signals,
                 'processed_xstp_df': processed_xstp_df,
                 'processed_main_report': processed_main_report,
                 'individual_industry': industry_info_df,
@@ -1236,11 +1238,11 @@ class StockAnalyzer:
 
             # 6. 准备报告数据
             sheets_data = {
-                '数据汇总': consolidated_report,  # 替换为数据汇总表
+                '数据汇总': consolidated_report,
                 '行业深度分析': industry_analysis_df,
                 '主力研报筛选': processed_data['processed_main_report'],
-                '均线多头排列': processed_xstp_df,  # 使用处理后且过滤后的数据
-                '实时行情': spot_df,  # 使用清洗后的数据
+                '均线多头排列': processed_xstp_df,
+                '实时行情': spot_df,
                 '5日市场资金流向': raw_data['market_fund_flow_raw'],
                 '10日市场资金流向': raw_data['market_fund_flow_raw_10'],
                 '20日市场资金流向': raw_data['market_fund_flow_raw_20'],
@@ -1250,9 +1252,9 @@ class StockAnalyzer:
                 '持续放量': raw_data['cxfl_raw'],
                 'MACD_12269金叉': ta_signals.get('MACD_12269', pd.DataFrame()),
                 'MACD_6135金叉': ta_signals.get('MACD_6135', pd.DataFrame()),
-                'MACD_DIF_动能状态': ta_signals.get('MACD_DIF_MOMENTUM', pd.DataFrame()),  # <== 新增这一行
+                'MACD_DIF_动能状态': ta_signals.get('MACD_DIF_MOMENTUM', pd.DataFrame()),
                 'KDJ超卖金叉': ta_signals.get('KDJ', pd.DataFrame()),
-                'CCI专业状态': ta_signals.get('CCI', pd.DataFrame()),  # **改进点：使用专业状态**
+                'CCI专业状态': ta_signals.get('CCI', pd.DataFrame()),
                 'RSI超卖': ta_signals.get('RSI', pd.DataFrame()),
                 'BOLL低波': ta_signals.get('BOLL', pd.DataFrame()),
                 '前十板块成分股': raw_data['top_industry_cons_df'],
@@ -1260,6 +1262,34 @@ class StockAnalyzer:
 
             # 7. 生成报告
             self._generate_report(sheets_data)
+
+
+            try:
+
+                db_manager = DatabaseWriter.QuantDBManager(
+                    user='postgres', password='025874yan',
+                    host='127.0.0.1', port='5432', db_name='Corenews'
+                )
+
+                sync_task = QuantDataPerformer.QuantDBSyncTask(db_manager)
+
+
+                # 同步
+                sync_task.sync_all(
+                    today_str=self.today_str,
+                    consolidated_report=consolidated_report,
+                    industry_df=industry_analysis_df,  # 修复未定义
+                    raw_data=raw_data
+                )
+
+                db_manager.close()
+                print("数据库同步成功完成。")
+
+            except Exception as e:
+                print(f"!!! [同步中断] 任务运行异常: {e}")
+
+
+
 
         except Exception as e:
             print(f"\n[FATAL] 致命错误：数据分析流程意外终止。原因: {e}")
