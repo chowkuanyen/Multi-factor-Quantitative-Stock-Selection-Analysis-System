@@ -2,7 +2,8 @@ import akshare as ak
 import pandas as pd
 import time
 import os
-import ParallelUtils as utils  # 确保你的工程目录下有这个工具类
+import threading  # 新增导入 threading
+from DataManager import ParallelUtils as utils
 from typing import List, Dict, Optional
 
 
@@ -43,7 +44,18 @@ class ChipDistributionAnalyzer:
         """
         print(f"\n>>> 正在调用 AkShare 接口获取 {len(codes)} 只股票的筹码分布信息...")
 
+        # --- 新增：熔断机制相关变量 ---
+        api_broken_flag = False
+        consecutive_fail_count = 0
+        lock = threading.Lock()
+
         def fetch_worker(code):
+            nonlocal api_broken_flag, consecutive_fail_count
+
+            # 如果已经触发熔断，后续任务直接空转返回，不再发起网络请求
+            if api_broken_flag:
+                return None
+
             # 接口尝试
             for _ in range(self.config.DATA_FETCH_RETRIES):
                 try:
@@ -55,6 +67,10 @@ class ChipDistributionAnalyzer:
                         concentrate = last_row['90集中度']
                         avg_cost = last_row['平均成本']
 
+                        # 成功获取数据，重置连续失败计数器
+                        with lock:
+                            consecutive_fail_count = 0
+
                         return {
                             '股票代码': code,
                             '获利比例': f"{p_ratio:.2f}%",
@@ -64,6 +80,15 @@ class ChipDistributionAnalyzer:
                         }
                 except Exception:
                     time.sleep(1)
+
+            # 走到这里说明该股票重试后依然失败
+            with lock:
+                consecutive_fail_count += 1
+                # 如果连续失败达到 10 次，触发熔断
+                if consecutive_fail_count >= 10 and not api_broken_flag:
+                    api_broken_flag = True
+                    print("\n[警告] AkShare接口连续失败10次，判定接口已关闭或被封IP，自动终止后续请求！")
+
             return None
 
         # 使用 ParallelUtils 中的通用并发工具
@@ -76,6 +101,7 @@ class ChipDistributionAnalyzer:
 
         final_df = pd.DataFrame([r for r in results if r])
         if final_df.empty:
+            print(">>> 获取结果为空。")
             return pd.DataFrame(columns=['股票代码', '获利比例', '90集中度', '平均成本', '筹码状态'])
 
         return final_df
