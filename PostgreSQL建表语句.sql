@@ -1,3 +1,16 @@
+-- stock_daily_kline
+
+-- public.stock_daily_kline definition
+-- Drop table
+-- DROP TABLE public.stock_daily_kline;
+CREATE TABLE public.stock_daily_kline ( symbol varchar(10) NOT NULL, trade_date date NOT NULL, "open" numeric(16, 4) NULL, "close" numeric(16, 4) NULL, high numeric(16, 4) NULL, low numeric(16, 4) NULL, close_normal numeric(16, 4) NULL, adj_ratio numeric(24, 12) NULL, CONSTRAINT stock_daily_kline_pkey PRIMARY KEY (symbol, trade_date), CONSTRAINT unique_stock_daily_kline_symbol_date UNIQUE (symbol, trade_date));
+
+--trade_calendar
+
+-- public.trade_calendar definition
+-- Drop table
+-- DROP TABLE public.trade_calendar;
+CREATE TABLE public.trade_calendar ( trade_date date NOT NULL, CONSTRAINT trade_calendar_pkey PRIMARY KEY (trade_date));
 
 -- app_stock_strategy_report definition
 
