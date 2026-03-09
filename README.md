@@ -1,7 +1,8 @@
 <p align="center">
   <img src="https://github.com/paiyuyen/Multi-factor-Quantitative-Stock-Selection-Analysis-System/raw/main/Images/logo.png" alt="LOGO" width="50%">
-  <br>
-  <b>BAISYS 多因子A股量化分析报告</b>
+  <br/>
+  <b >BAISYS多因子量化复盘宝</b>
+  <br/>  <br/>
 </p>
 <p align="center">
     <img src="https://img.shields.io/badge/Python-3.8+-blue?logo=python&logoColor=white" />
