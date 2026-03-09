@@ -37,19 +37,19 @@ def format_stock_code(code: str) -> str:
     兼容 '000001' 和 'sz000001' 两种输入，并统一输出 'sz000001' 格式。
     """
     code_str = str(code)
-    # 如果已经带前缀，直接返回
+
     if code_str.startswith(('sh', 'sz', 'bj')):
         return code_str
 
-    # 否则，假设是纯数字，补齐并添加前缀
+
     code_str = code_str.zfill(6)
     if code_str.startswith('6'):
         return 'sh' + code_str
     elif code_str.startswith(('0', '3')):
         return 'sz' + code_str
-    elif code_str.startswith(('4', '8')):  # 考虑北交所
+    elif code_str.startswith(('4', '8')):
         return 'bj' + code_str
-    return code_str  # 无法识别则返回原字符串
+    return code_str
 
 
 class StockAnalyzer:
@@ -62,8 +62,9 @@ class StockAnalyzer:
         self.executor = ThreadPoolExecutor(max_workers=self.config.MAX_WORKERS)
         self.start_time = time.time()
 
-        self.sync_engine = StockSyncEngine()
-        self.db_engine = self.sync_engine.db  # 复用 HistDataWatchDog 的 SQLAlchemy Engine
+        # >>> 修改点 1: 实例化 StockSyncEngine 时传入 base_data_dir
+        self.sync_engine = StockSyncEngine(base_data_dir=self.config.SAVE_DIRECTORY)
+        self.db_engine = self.sync_engine.db
 
     def _get_file_path(self, base_name: str, cleaned: bool = False) -> str:
         """
@@ -111,7 +112,7 @@ class StockAnalyzer:
                 print(f"  - 正在尝试第 {i + 1}/{self.config.DATA_FETCH_RETRIES} 次获取数据: {file_base_name}...")
                 df = fetch_func(**kwargs)
                 if df is not None and not df.empty:
-                    break  # 成功获取数据，跳出重试循环
+                    break
                 else:
                     print(f"[WARN] 数据返回为空或无效: {file_base_name}，重试中。")
                     time.sleep(self.config.DATA_FETCH_DELAY)
@@ -134,7 +135,7 @@ class StockAnalyzer:
         """通用数据清洗和列名标准化。"""
         if df.empty: return df
         df = utils._normalize_fund_data(df)
-        # 1. 标准化列名：使用 Config 中的别名映射
+
         for old, new in self.config.CODE_ALIASES.items():
             if old in df.columns: df.rename(columns={old: new}, inplace=True)
         for old, new in self.config.NAME_ALIASES.items():
@@ -170,9 +171,8 @@ class StockAnalyzer:
         从 HistDataEngine 生成的本地 StockIndes 文件中加载行业信息。
         将文件中的 Akshare 格式代码转换为纯数字，并与输入的纯数字代码列表匹配。
         """
-        # 1. 定义文件路径
-        dict_file_path = os.path.join(os.path.expanduser('~'),
-                                      f'StockIndes_{self.today_str}.txt')  # 注意这里要用 os.path.expanduser('~') 来匹配 HistDataEngine 的保存路径
+        # >>> 修改点 2: 明确使用 self.config.SAVE_DIRECTORY 作为基础路径来加载文件
+        dict_file_path = os.path.join(self.config.SAVE_DIRECTORY, f'StockIndes_{self.today_str}.txt')
 
         industry_df_raw = pd.DataFrame()
         if os.path.exists(dict_file_path):
@@ -195,7 +195,7 @@ class StockAnalyzer:
                             return code_str.split('.')[0].zfill(6)
                         elif code_str.startswith(('sh', 'sz', 'bj')):  # sz000001
                             return code_str[2:].zfill(6)
-                        return str(code_str).zfill(6)  # 纯数字，确保6位
+                        return str(code_str).zfill(6)
 
                     industry_df_raw['股票代码'] = industry_df_raw['ts_code'].apply(to_pure_code)
                 elif '股票代码' in industry_df_raw.columns:
@@ -339,7 +339,7 @@ class StockAnalyzer:
                     constituents_df.rename(columns={'代码': '股票代码'}, inplace=True)
 
                 if '股票代码' in constituents_df.columns:
-                    constituents_df['股票代码'] = constituents_df['股票代码'].astype(str).str.zfill(6)
+                    constituents_df['股票代码'] = constituents_df['股票代码'].astype(str).zfill(6)
                     constituents_df['所属板块'] = industry_name
                     return constituents_df[['股票代码', '所属板块']].drop_duplicates()
             return None
@@ -372,14 +372,7 @@ class StockAnalyzer:
         cache_name = f"MACD_hist_data_cache"
         file_path = self._get_file_path(cache_name, cleaned=True)
 
-        # 暂时跳过缓存检查，确保每次都从数据库读取最新数据
-        # cached_df = self._load_data_from_cache(file_path)
-        # if not cached_df.empty and 'close' in cached_df.columns:
-        #     # ... 缓存逻辑 ...
-        #     print(f"  - 历史数据缓存有效，直接加载。")
-        #     return cached_df
-        # else:
-        #     print(f"[WARN] 历史数据缓存文件不完整或过期，将从数据库重新获取。")
+
 
         def fetch_worker(symbol_prefixed: str) -> pd.DataFrame:
             """
@@ -572,7 +565,7 @@ class StockAnalyzer:
         final_df['股票简称'] = final_df['股票简称'].fillna('N/A')
         final_df['最新价'] = final_df['最新价'].fillna('N/A')
 
-        # 处理研报买入次数，直接合并到 final_df
+
         # processed_data['processed_main_report'] 应该已经包含了过滤 > 1 的逻辑
         report_df_for_merge = processed_data['processed_main_report'][['股票代码', '机构投资评级(近六个月)-买入']]
         report_df_for_merge.rename(columns={'机构投资评级(近六个月)-买入': '研报买入次数'}, inplace=True)
@@ -847,9 +840,8 @@ class StockAnalyzer:
         try:
             # Step 1: 调用 HistDataWatchDog 同步股票池并获取基础股票列表
             print("\n>>> 调用 HistDataWatchDog 同步股票数据到数据库...")
-            self.sync_engine.run_engine()  # 执行 HistDataWatchDog 的同步任务
+            self.sync_engine.run_engine()
 
-            # 获取当天已同步到数据库的股票代码列表（带前缀，如 'sz000001'）
             synced_codes_df_from_db = pd.DataFrame(columns=['symbol'])  # 初始化为空，以防查询失败
 
             try:
@@ -859,7 +851,7 @@ class StockAnalyzer:
                     latest_db_date_result = conn.execute(latest_date_query).scalar_one_or_none()
                     if latest_db_date_result is None:
                         print("[FATAL] 数据库中 'stock_daily_kline' 表没有K线数据，无法获取股票代码列表，流程终止。")
-                        return  # 返回None或者空DataFrame，以便后续判断退出
+                        return
                     # 2. 查询在该最新交易日期有数据的股票代码
                     query_symbols = text(f"""
                                     SELECT DISTINCT symbol
