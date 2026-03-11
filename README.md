@@ -27,6 +27,8 @@
 
 --MACD前复权精准度提升至小数点后4位能与同花顺保持一致性--Done at 09-03-2026
 
+<br />
+
 **技术升级：**
 
 **引入回测系统，实现从“经验判断”到“量化分析”的跨越。**
@@ -108,7 +110,9 @@ BOLL：低波/缩口状态。
 **数据库**
 
 PostgreSQL：请确保您的系统已安装并运行 PostgreSQL 数据库。
+
 数据库创建：在 PostgreSQL 中创建一个名为 Corenews 的数据库，并记住您的数据库用户名和密码（本项目默认为 postgres 和 025874yan）。
+
 创建表结构：执行 sql_schema.sql 文件中的 SQL 语句，创建 stock_daily_kline 和 daily_stock_report, daily_industry_analysis 等必要的数据表。
 
 **Tushare Pro Token**
@@ -133,9 +137,11 @@ cd your_repo_name
 **创建并激活虚拟环境 (推荐)：**
 
 python -m venv .venv
+
 # Windows
 .venv\Scripts\activate
-# macOS/Linux
+
+# MacOS/Linux
 source .venv/bin/activate
 
 **安装依赖包:**
@@ -167,6 +173,8 @@ DATA_FETCH_RETRIES: 数据获取失败后的重试次数。
 DATA_FETCH_DELAY: 数据获取失败后重试的延迟时间（秒）。
 
 MAX_WORKERS: 并发处理任务的最大线程数。
+
+<br />
 
 **HistDataEngine.py：**
 
@@ -305,7 +313,17 @@ CREATE TABLE IF NOT EXISTS daily_industry_analysis (
 
 <br />
 
-⚠️ 免责声明
+## ⚠️ 注意事项：
+
+请确保 PostgreSQL 服务已启动
+
+首次运行需安装依赖：pip install psycopg2-binary akshare pandas ta tushare
+
+数据同步依赖 Akshare，建议在交易日 15:30 后运行，数据最全
+
+<br />
+
+## ⚠️ 免责声明
 
 本项目提供的所有数据、分析报告和投资建议仅供学习、研究和参考，不构成任何投资建议。投资者应自行承担投资风险，并根据自身情况做出独立的投资决策。本项目的开发者不对任何使用本系统数据或分析结果而导致的投资损失承担责任。
 
