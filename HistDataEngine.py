@@ -1,5 +1,3 @@
-# HistDataEngine.py
-
 import os
 import akshare as ak
 import pandas as pd
@@ -44,7 +42,7 @@ class StockSyncEngine:
                   f"  - 错误详情: {type(e).__name__}: {e}")
             raise RuntimeError("数据库引擎初始化失败，程序无法继续。") from e
 
-        self.global_start = "20250101"  # 通常需要一个过去的日期来获取历史数据
+        self.global_start = "20250501"  # 通常需要一个过去的日期来获取历史数据
         self.today = datetime.datetime.now().strftime("%Y%m%d")
         self.today_dt = pd.to_datetime(self.today).normalize()
 
